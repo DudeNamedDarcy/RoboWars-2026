@@ -132,3 +132,44 @@ uint8_t readEdges() {
   if (analogRead(IR_BR) > BOUNDARY_VAL) mask |= (1 << 3);
   return mask;
 }
+
+// Setup
+void setup() {
+  Serial.begin(115200);
+
+  Wire1.begin();
+  Wire1.setClock(400000);
+
+  pinMode(RATCHET_PIN, OUTPUT); releaseRatchet();
+  pinMode(STRT_MOD,    INPUT_PULLUP);
+
+  motor1.attach(MOTOR_1_PIN);
+  motor2.attach(MOTOR_2_PIN);
+  Serial.println("Arming ESCs...");
+  motor1.writeMicroseconds(ESC_STOP);
+  motor2.writeMicroseconds(ESC_STOP);
+  delay(3000);
+  Serial.println("ESCs armed");
+
+  tcaSelect(0);
+  if (!tof.begin(0x29, false, &Wire1)) {
+    Serial.println("ERROR: VL53L0X not found");
+    while (1);
+  }
+  tof.startRangeContinuous();
+
+  if (!mpu.begin(MPU_ADDR, &Wire1)) {
+    Serial.println("WARNING: MPU-6050 not found");
+  } else {
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  }
+
+  Serial.println("Waiting for start signal...");
+  unsigned long t = millis();
+  while (digitalRead(STRT_MOD) == HIGH && millis() - t < STARTUP_DELAY);
+
+  mode = ORBIT;
+  Serial.println("GO — ORBIT");
+}

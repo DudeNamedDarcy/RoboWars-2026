@@ -173,3 +173,43 @@ void setup() {
   mode = ORBIT;
   Serial.println("GO — ORBIT");
 }
+
+// Loop
+void loop() {
+  uint8_t edges = readEdges();
+  if (edges) {
+    driveReverse();
+    delay(REVERSAL_TIME);
+    stopMotors();
+
+    bool leftTriggered  = (edges & 0b0101);
+    bool rightTriggered = (edges & 0b1010);
+
+    if      (leftTriggered && !rightTriggered) pivotRight();
+    else if (rightTriggered && !leftTriggered) pivotLeft();
+    else                                        pivotRight();
+
+    mode = ORBIT;
+    return;
+  }
+
+  uint16_t dist = readDistance();
+
+  if (mode == ORBIT) {
+    driveOrbit();
+    if (dist > 0 && dist <= ENGAGE_DIST) {
+      Serial.print("Target "); Serial.print(dist); Serial.println("cm — CHARGE");
+      engageRatchet();
+      mode = CHARGE;
+    }
+  }
+
+  if (mode == CHARGE) {
+    driveForward();
+    if (dist == 0 || dist > ENGAGE_DIST) {
+      Serial.println("Lost — ORBIT");
+      releaseRatchet();
+      mode = ORBIT;
+    }
+  }
+}

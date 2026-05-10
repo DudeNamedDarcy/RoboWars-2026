@@ -123,3 +123,12 @@ uint16_t readDistance() {
   if (measure.RangeStatus == 4) return 0;
   return measure.RangeMilliMeter / 10;
 }
+// Edge Sensor Reading
+uint8_t readEdges() {
+  uint8_t mask = 0;
+  if (analogRead(IR_FL) > BOUNDARY_VAL) mask |= (1 << 0);
+  if (analogRead(IR_FR) > BOUNDARY_VAL) mask |= (1 << 1);
+  if (analogRead(IR_BL) > BOUNDARY_VAL) mask |= (1 << 2);
+  if (analogRead(IR_BR) > BOUNDARY_VAL) mask |= (1 << 3);
+  return mask;
+}

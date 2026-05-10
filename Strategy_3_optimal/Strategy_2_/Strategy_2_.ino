@@ -5,8 +5,12 @@
 #include <Servo.h>
 
 /*
+  STRATEGY 3 CODE
+
   Note that a lot of these are temp values that are to be updated later since we dont currently have the robot.
   THIS IS NOT READY FOR TESTING YET
+
+  Yo Max this code might be bad sorry in advance
 */
 
 // I2C addresses (to be confirmed later)
@@ -17,11 +21,11 @@
 // Pins
 #define RATCHET_PIN 4
 
-// IR sensor pins (B = Back, F = Front), if doing analogRead, these DEFINITELY need to be changed.
+// IR sensor pins (B = Back, F = Front), if we're doing shadows and stuff, these DEFINITELY need to be AnalogRead
 #define IR_FL 5
 #define IR_FR 6
-#define IR_BL 7
-#define IR_BR 8
+#define IR_NL 7
+#define IR_NR 8
 
 // Start module
 #define STRT_MOD 9
@@ -38,22 +42,28 @@
 #define ESC_FULL_FWD  2000
 #define ESC_STOP      1500
 #define ESC_FULL_REV  1000
+#define REACQUIRE_TIME 300 //pivot duration when flanked
 
 // Constants (to be perfected through testing/checking with staff)
-#define ENGAGE_DIST     30
+#define ENGAGE_DIST     200
 #define BOUNDARY_VAL    600
+#define REVERSAL_TIME   200 //reverse duration on contact loss
+#define STARTUP_DELAY   10000
+//new Strategy 3 constants
+#define FULL 255
+#define CORRECT_SPEED 180
+/* not needed? 
 #define ORBIT_1         1600
 #define ORBIT_2         1800
-#define REVERSAL_TIME   250
-#define STARTUP_DELAY   10000
+*/
 
 // Trapezoidal acceleration constants (to be tuned through testing)
 #define ACCEL_STEP      10
 #define ACCEL_DELAY     10
 
 // Enum mode lets us switch between behaviours
-enum Mode { ORBIT, CHARGE };
-Mode mode = ORBIT;
+enum Mode { DESTROY, REACQUIRE };
+Mode mode = DESTROY;
 
 // Track current ESC positions for trapezoid ramp
 int currentSpd1 = ESC_STOP;
@@ -66,6 +76,13 @@ Adafruit_MPU6050 mpu;
 // Servo objects for ESC control
 Servo motor1;
 Servo motor2;
+
+//hits for the loop
+int left_hit = 0;
+int right_hit = 0;
+int center_hit = 0;
+
+last_seen = LEFT;
 
 // MUX Communication, controls 8 different i2c buses: channels 0-7
 void tcaSelect(uint8_t channel) {
@@ -101,7 +118,7 @@ void pivotLeft() {
   motor2.writeMicroseconds(ESC_FULL_FWD);
   currentSpd1 = ESC_FULL_REV;
   currentSpd2 = ESC_FULL_FWD;
-  delay(150);
+  delay(REACQUIRE_TIME);
 }
 
 void pivotRight() {
@@ -109,7 +126,7 @@ void pivotRight() {
   motor2.writeMicroseconds(ESC_FULL_REV);
   currentSpd1 = ESC_FULL_FWD;
   currentSpd2 = ESC_FULL_REV;
-  delay(150);
+  delay(REACQUIRE_TIME);
 }
 
 // Ratchet
@@ -171,12 +188,13 @@ void setup() {
   unsigned long t = millis();
   while (digitalRead(STRT_MOD) == HIGH && millis() - t < STARTUP_DELAY);
 
-  mode = ORBIT;
-  Serial.println("GO — ORBIT");
+  mode = DESTROY;
+  Serial.println("GO — DESTROY");
 }
 
 // Loop
 void loop() {
+
   uint8_t edges = readEdges();
   if (edges) {
     driveReverse();
@@ -186,27 +204,65 @@ void loop() {
     bool leftTriggered  = (edges & 0b0101); //0b0101 = either LEFT sensor triggered
     bool rightTriggered = (edges & 0b1010); //0b1010 = either RIGHT sensor triggered
 
-    if      (leftTriggered && !rightTriggered) pivotRight();
-    else if (rightTriggered && !leftTriggered) pivotLeft();
-    else                                        pivotRight();
+    if      (leftTriggered && !rightTriggered) last_seen = LEFT;
+    else if (rightTriggered && !leftTriggered) last_seen = RIGHT;
+    else                                       last_seen = CENTER;
 
-    mode = ORBIT;
+    mode = REACQUIRE;
     return;
   }
 
   uint16_t dist = readDistance();
 
-  if (mode == ORBIT) {
-    driveOrbit();
-    if (dist > 0 && dist <= ENGAGE_DIST) {
-      Serial.print("Target "); Serial.print(dist); Serial.println("cm — CHARGE");
-      engageRatchet();
-      mode = CHARGE;
+  if dist > BOUNDARY_VAL {
+    //drive forward(FULL)
+    return 
+  }
+
+  if (mode == DESTROY) {
+    left_hit = 
+    right_hit = 
+    center_hit = 
+
+    if (center_hit && !left_hit && !right_hit){
+      driveForward();
+    }
+
+    else if (IR_FL) {
+
+    }
+    else if (IR_FR) {
+      
+    }
+    else if (IR_NL) {
+      
+    }
+    else if (IR_NR) {
+      
+    }
+    else {
+      //no IR contact at all
+      mode = REACQUIRE
     }
   }
 
-  if (mode == CHARGE) {
-    driveForward();
+  if (mode == REACQUIRE) {
+    //reverse(FULL) for BACK_TIME
+    driveReverse();
+    delay(REVERSAL_TIME);
+
+    if (last_seen == LEFT){
+      pivotLeft();
+    }
+    else if (last_seen == RIGHT){
+      pivotRight();
+    }
+    else{
+      pivotRight();
+    }
+
+
+
     if (dist == 0 || dist > ENGAGE_DIST) {
       Serial.println("Lost — ORBIT");
       releaseRatchet();

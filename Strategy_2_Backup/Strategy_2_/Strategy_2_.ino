@@ -121,9 +121,17 @@ uint16_t readDistance() {
   tcaSelect(0);
   VL53L0X_RangingMeasurementData_t measure;
   tof.rangingTest(&measure, false);
-  if (measure.RangeStatus == 4) return 0;
+  
+  // Print the status so we can see what's actually happening
+  if (measure.RangeStatus != 0) {
+    Serial.print("Status Error: "); Serial.println(measure.RangeStatus);
+    return 0;
+  }
   return measure.RangeMilliMeter / 10;
 }
+
+
+
 // Edge Sensor Reading
 uint8_t readEdges() {
   uint8_t mask = 0;

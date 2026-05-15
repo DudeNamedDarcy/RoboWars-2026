@@ -3,27 +3,28 @@
 #include <Adafruit_VL53L0X.h>
 #include <MPU6050.h>
 
-// ── Pin definitions ──────────────────────────────────────────────────────────
-#define PIN_EDGE_FL      5    // TCRT5000 digital output — front left
-#define PIN_EDGE_FR      6    // TCRT5000 digital output — front right
-#define PIN_EDGE_RL      7    // TCRT5000 digital output — rear left
-#define PIN_EDGE_RR      8    // TCRT5000 digital output — rear right
+// for all tweaks regarding variables (small changes that could result in decent changes in the programming)
+// change these if you don't like certain behavior
+#define PIN_EDGE_FL      5    
+#define PIN_EDGE_FR      6   
+#define PIN_EDGE_RL      7    
+#define PIN_EDGE_RR      8    
 #define PIN_START        9
 #define PIN_MOTOR_L     10
 #define PIN_MOTOR_R     11
 
-// ── TCA9548A I2C multiplexer ─────────────────────────────────────────────────
+// Multiplexer variable declarations
 #define MUX_ADDR      0x70
 #define MUX_CH_TOF_F  0
 #define MUX_CH_TOF_R  1
 #define MUX_CH_IMU    2
 
-// ── Sensor thresholds ────────────────────────────────────────────────────────
+// Sensor values
 #define TOF_ATTACK_MM   350
 #define TOF_SCAN_MM     900
 #define TOF_CONTACT_MM  120
 
-// ── Motor control ────────────────────────────────────────────────────────────
+// Motor Speeds
 #define PWM_MAX         255
 #define PWM_SPIN        190
 #define PWM_RAM         255
@@ -32,12 +33,12 @@
 #define ACCEL_STEP_RAM    6
 #define ACCEL_STEP_STOP  20
 
-// ── Pivot parameters ─────────────────────────────────────────────────────────
+// Pivot Parameters, check after
 #define PIVOT_DEGREES   180.0f
 #define DECEL_ZONE_DEG   45.0f
-#define GYRO_SCALE     (1.0f / 131.0f)  // MPU-6050 default ±250°/s
+#define GYRO_SCALE     (1.0f / 131.0f)
 
-// ── State machine ────────────────────────────────────────────────────────────
+// States
 enum RobotState {
   STATE_WAIT,
   STATE_PIVOT,
@@ -47,27 +48,21 @@ enum RobotState {
   STATE_HALT
 };
 
-// ── Globals ──────────────────────────────────────────────────────────────────
-RobotState       state       = STATE_WAIT;
-Servo            motorL, motorR;
+// globals
+RobotState state = STATE_WAIT;
+Servo motorL, motorR;
 Adafruit_VL53L0X tof;
-MPU6050          imu(MPU6050_DEFAULT_ADDRESS, &Wire2);
-float            yawAccum    = 0.0f;
-uint32_t         tLastUs     = 0;
-int16_t          gyroZOffset = 0;
+// MPU6050 constructor without Wire pointer — Wire2 is activated via muxSelect before any imu call
+MPU6050 imu;
+float    yawAccum    = 0.0f;
+uint32_t tLastUs     = 0;
+int16_t  gyroZOffset = 0;
 
-// =============================================================================
-// EDGE DETECTION — digitalRead
-// WHITE LINE = DO HIGH (potentiometer-set threshold on module).
-// If modules output LOW on white, flip == HIGH to == LOW in both functions.
-// =============================================================================
 bool edgeDetected() {
-  bool fl = digitalRead(PIN_EDGE_FL);
-  bool fr = digitalRead(PIN_EDGE_FR);
-  bool rl = digitalRead(PIN_EDGE_RL);
-  bool rr = digitalRead(PIN_EDGE_RR);
-
-  if (fl || fr || rl || rr) {
+  // First read — if nothing is HIGH we can exit immediately without the debounce delay
+  if (digitalRead(PIN_EDGE_FL) || digitalRead(PIN_EDGE_FR) ||
+      digitalRead(PIN_EDGE_RL) || digitalRead(PIN_EDGE_RR)) {
+    // Something triggered — wait 500µs and re-read to confirm it's not a noise spike
     delayMicroseconds(500);
     return (digitalRead(PIN_EDGE_FL) || digitalRead(PIN_EDGE_FR) ||
             digitalRead(PIN_EDGE_RL) || digitalRead(PIN_EDGE_RR));
@@ -75,15 +70,19 @@ bool edgeDetected() {
   return false;
 }
 
-// -1 = left triggered  → spin right to face inward
-//  1 = right triggered → spin left to face inward
-//  0 = front/rear or equal → treat as centre
+// Here I used logic based on where the edges are being detected
+// -1 = left triggered then spin right to face inward
+//  1 = right triggered then spin left to face inward
+//  0 = front/rear or equal then treat as centre
 int edgeDirection() {
+  // Short delay before reading — ensures we sample after any bounce settles
   delayMicroseconds(500);
   bool fl = digitalRead(PIN_EDGE_FL) == HIGH;
   bool fr = digitalRead(PIN_EDGE_FR) == HIGH;
   bool rl = digitalRead(PIN_EDGE_RL) == HIGH;
   bool rr = digitalRead(PIN_EDGE_RR) == HIGH;
+  // Count how many left-side vs right-side sensors are triggered
+  // Majority side determines which way to spin back toward center
   int leftCount  = (fl ? 1 : 0) + (rl ? 1 : 0);
   int rightCount = (fr ? 1 : 0) + (rr ? 1 : 0);
   if (leftCount > rightCount) return -1;
@@ -91,40 +90,38 @@ int edgeDirection() {
   return 0;
 }
 
-// =============================================================================
 // I2C MUX
-// =============================================================================
 void muxSelect(uint8_t channel) {
   if (channel > 7) return;
   Wire2.beginTransmission(MUX_ADDR);
-  Wire2.write(1 << channel);
+  Wire2.write(1 << channel);  // bitmask enables exactly one channel
   Wire2.endTransmission();
-  delayMicroseconds(50);
+  delayMicroseconds(50);  // settle time before next transmission
 }
 
 void muxDisableAll() {
   Wire2.beginTransmission(MUX_ADDR);
-  Wire2.write(0x00);
+  Wire2.write(0x00);  // zero disables all channels
   Wire2.endTransmission();
 }
 
-// =============================================================================
 // ToF
-// =============================================================================
 uint16_t readToF(uint8_t muxChannel) {
   muxSelect(muxChannel);
   VL53L0X_RangingMeasurementData_t measure;
   tof.rangingTest(&measure, false);
+  // RangeStatus 4 means no target detected — return max distance so
+  // no state transition is accidentally triggered by an empty reading
   if (measure.RangeStatus != 4) {
     return constrain(measure.RangeMilliMeter, 0, 2000);
   }
   return 2000;
 }
 
-// =============================================================================
-// MOTOR CONTROL
-// =============================================================================
+// MOTOR Logic
 void trapRamp(int& current, int target, int step) {
+  // Move current toward target by at most one step per call.
+  // Called every loop tick — the faster the loop, the smoother the ramp.
   if (current < target) current = min(current + step, target);
   else if (current > target) current = max(current - step, target);
 }
@@ -138,9 +135,7 @@ void setMotors(int l, int r) {
   motorR.writeMicroseconds(map(r, -PWM_MAX, PWM_MAX, 1000, 2000));
 }
 
-// =============================================================================
 // GYRO
-// =============================================================================
 
 // Averages 500 samples at rest to find zero-rate offset. Robot must be still.
 void calibrateGyro() {
@@ -152,6 +147,8 @@ void calibrateGyro() {
     sum += gz;
     delay(2);
   }
+  // Store average as offset — subtracted from every future gz reading
+  // so the robot doesn't think it's rotating when it's standing still
   gyroZOffset = (int16_t)(sum / 500);
   Serial.print("Gyro Z offset: ");
   Serial.println(gyroZOffset);
@@ -163,6 +160,8 @@ float headingCorrection() {
   muxSelect(MUX_CH_IMU);
   int16_t ax, ay, az, gx, gy, gz;
   imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  // Subtract offset to get true rotation rate, scale to degrees/second,
+  // then multiply by gain to get a PWM correction value
   float rateZ = (gz - gyroZOffset) * GYRO_SCALE;
   return rateZ * 0.4f;
 }
@@ -185,37 +184,53 @@ void executePivot() {
   while (abs(yawAccum) < PIVOT_DEGREES) {
 
     if (edgeDetected()) {
+      // Ramp down before stopping — avoids ESC voltage spike from instant cutoff
+      while (spinPWM > 0) {
+        trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
+        setMotors(spinPWM, -spinPWM);
+      }
       setMotors(0, 0);
       state = STATE_RECOVER;
       return;
     }
 
+    // Compute dt in seconds using micros() for sub-millisecond precision
     uint32_t now = micros();
     float dt = (now - tLastUs) / 1e6f;
     tLastUs  = now;
 
     int16_t ax, ay, az, gx, gy, gz;
     imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    // Integrate gyro Z rate over time to track total rotation
     float rateZ = (gz - gyroZOffset) * GYRO_SCALE;
     yawAccum += rateZ * dt;
 
     float remaining = PIVOT_DEGREES - abs(yawAccum);
     int targetSpd;
     if (remaining < DECEL_ZONE_DEG) {
+      // Inside decel zone — map remaining degrees to a lower speed
+      // so treads slow down smoothly instead of slamming to a stop
       targetSpd = (int)map((long)remaining, 5, (long)DECEL_ZONE_DEG, 40, PWM_SPIN);
-      targetSpd = max(targetSpd, 40);
+      targetSpd = max(targetSpd, 40);  // floor at 40 to keep moving until loop exits
     } else {
       targetSpd = PWM_SPIN;
     }
 
     trapRamp(spinPWM, targetSpd, ACCEL_STEP_SPIN);
-    setMotors(spinPWM, -spinPWM);
+    setMotors(spinPWM, -spinPWM);  // opposite signs = counter-rotate in place
 
     if (remaining < 90.0f) {
+      // Only check ToF in second half of pivot — avoids false positives
+      // while robot is still facing away from the opponent
       uint16_t dist = readToF(MUX_CH_TOF_F);
-      muxSelect(MUX_CH_IMU);
+      muxSelect(MUX_CH_IMU);  // reselect IMU after ToF switches the mux
       if (dist < TOF_ATTACK_MM) {
         Serial.println("Target mid-pivot — transitioning to RAM");
+        // Ramp down before RAM so it starts from a clean zero
+        while (spinPWM > 0) {
+          trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
+          setMotors(spinPWM, -spinPWM);
+        }
         setMotors(0, 0);
         state = STATE_RAM;
         return;
@@ -223,6 +238,12 @@ void executePivot() {
     }
   }
 
+  // Normal completion — spinPWM is already near 40 from decel zone,
+  // so this ramp is brief
+  while (spinPWM > 0) {
+    trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
+    setMotors(spinPWM, -spinPWM);
+  }
   setMotors(0, 0);
   delay(30);
   Serial.print("Pivot complete. Yaw: ");
@@ -245,25 +266,36 @@ void executeScan() {
   while (millis() - scanStart < SCAN_TIMEOUT_MS) {
 
     if (edgeDetected()) {
+      // Ramp down spin before handing off — RECOVER starts its own ramp from 0
+      while (scanPWM > 0) {
+        trapRamp(scanPWM, 0, ACCEL_STEP_STOP);
+        setMotors(scanPWM, -scanPWM);
+      }
       setMotors(0, 0);
       state = STATE_RECOVER;
       return;
     }
 
     trapRamp(scanPWM, PWM_SCAN, ACCEL_STEP_SPIN);
-    setMotors(scanPWM, -scanPWM);
+    setMotors(scanPWM, -scanPWM);  // one tread forward, one back = spin in place
 
     uint16_t dist = readToF(MUX_CH_TOF_F);
     if (dist < TOF_SCAN_MM) {
       Serial.print("Target at ");
       Serial.print(dist);
       Serial.println(" mm — transitioning to RAM");
+      // Stop spin cleanly so RAM begins its ramp from zero, not mid-spin
+      while (scanPWM > 0) {
+        trapRamp(scanPWM, 0, ACCEL_STEP_STOP);
+        setMotors(scanPWM, -scanPWM);
+      }
       setMotors(0, 0);
       state = STATE_RAM;
       return;
     }
   }
 
+  // Timeout — exit and let loop() call executeScan() again on next tick
   Serial.println("Scan timeout — continuing");
 }
 
@@ -279,13 +311,20 @@ void executeRam() {
   while (true) {
 
     if (edgeDetected()) {
+      // Ramp both motors equally since they may have different corrected values
+      while (ramPWM > 0) {
+        trapRamp(ramPWM, 0, ACCEL_STEP_STOP);
+        setMotors(ramPWM, ramPWM);
+      }
       setMotors(0, 0);
       state = STATE_RECOVER;
       return;
     }
 
+    // Slowly ramp up — ACCEL_STEP_RAM=6 keeps torque high without tread slip
     trapRamp(ramPWM, PWM_RAM, ACCEL_STEP_RAM);
 
+    // Apply differential correction to counteract heading drift during attack
     float correction = headingCorrection();
     int corrL = constrain((int)(ramPWM - correction), 0, PWM_MAX);
     int corrR = constrain((int)(ramPWM + correction), 0, PWM_MAX);
@@ -294,7 +333,13 @@ void executeRam() {
     uint16_t dist = readToF(MUX_CH_TOF_F);
 
     if (dist > TOF_SCAN_MM) {
+      // Opponent escaped — decelerate before spinning to scan
+      // avoids carrying forward momentum into the scan rotation
       Serial.println("Contact lost — transitioning to SCAN");
+      while (ramPWM > 0) {
+        trapRamp(ramPWM, 0, ACCEL_STEP_STOP);
+        setMotors(ramPWM, ramPWM);
+      }
       setMotors(0, 0);
       state = STATE_SCAN;
       return;
@@ -311,15 +356,22 @@ void executeRam() {
 void executeRecover() {
   Serial.println("STATE: RECOVER");
 
+  // Read direction BEFORE reversing — reversing clears the sensors,
+  // so if we wait we lose the information about which side triggered
   int dir = edgeDirection();
 
   int recPWM = 0;
   uint32_t tReverse = millis();
   while (millis() - tReverse < 350) {
     trapRamp(recPWM, 150, ACCEL_STEP_STOP);
-    setMotors(-recPWM, -recPWM);
+    setMotors(-recPWM, -recPWM);  // both negative = reverse
   }
 
+  // Ramp reverse down before stopping
+  while (recPWM > 0) {
+    trapRamp(recPWM, 0, ACCEL_STEP_STOP);
+    setMotors(-recPWM, -recPWM);
+  }
   setMotors(0, 0);
   delay(20);
 
@@ -331,6 +383,14 @@ void executeRecover() {
   while (abs(yawAccum) < 90.0f) {
 
     if (edgeDetected()) {
+      // Second boundary hit during recovery pivot — ramp down in the same
+      // spin direction we were already turning, then re-enter RECOVER
+      // with a fresh direction read for the new situation
+      while (pivPWM > 0) {
+        trapRamp(pivPWM, 0, ACCEL_STEP_STOP);
+        if (dir >= 0) setMotors(-pivPWM,  pivPWM);
+        else          setMotors( pivPWM, -pivPWM);
+      }
       setMotors(0, 0);
       state = STATE_RECOVER;
       return;
@@ -345,14 +405,22 @@ void executeRecover() {
     float rateZ = (gz - gyroZOffset) * GYRO_SCALE;
     yawAccum += rateZ * dt;
 
+    // Slow down in the last 20° to avoid overshooting 90°
     float rem = 90.0f - abs(yawAccum);
     int tgt = (rem < 20.0f) ? 50 : 130;
     trapRamp(pivPWM, tgt, 6);
 
+    // dir determines which way to spin to face back toward center
     if (dir >= 0) setMotors(-pivPWM,  pivPWM);
     else          setMotors( pivPWM, -pivPWM);
   }
 
+  // Ramp down recovery pivot before transitioning to SCAN
+  while (pivPWM > 0) {
+    trapRamp(pivPWM, 0, ACCEL_STEP_STOP);
+    if (dir >= 0) setMotors(-pivPWM,  pivPWM);
+    else          setMotors( pivPWM, -pivPWM);
+  }
   setMotors(0, 0);
   delay(20);
   state = STATE_SCAN;
@@ -365,7 +433,7 @@ void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 3000);
 
-  // ── Edge sensor pins ──────────────────────────────────────────────────────
+  // Edge sensor pins
   // INPUT_PULLDOWN: floating pin reads LOW, preventing false triggers if
   // a sensor is disconnected.
   pinMode(PIN_EDGE_FL, INPUT_PULLDOWN);
@@ -373,7 +441,6 @@ void setup() {
   pinMode(PIN_EDGE_RL, INPUT_PULLDOWN);
   pinMode(PIN_EDGE_RR, INPUT_PULLDOWN);
 
-  // ── Other pins ────────────────────────────────────────────────────────────
   pinMode(PIN_START,   INPUT_PULLDOWN);
   pinMode(PIN_MOTOR_L, OUTPUT);
   pinMode(PIN_MOTOR_R, OUTPUT);
@@ -382,13 +449,13 @@ void setup() {
   setMotors(0, 0);   // 1500 µs neutral — begins ESC arming sequence
   delay(2000);
 
-  // ── I2C on Wire2 (pins 24=SCL2, 25=SDA2) ─────────────────────────────────
+  // I2C on Wire2 (pins 24=SCL2, 25=SDA2)
   Wire2.begin();
   Wire2.setClock(400000);
 
   muxDisableAll();
 
-  // ── VL53L0X (mux ch0) ────────────────────────────────────────────────────
+  // VL53L0X (mux ch0)
   muxSelect(MUX_CH_TOF_F);
   if (!tof.begin(VL53L0X_I2C_ADDR, false, &Wire2)) {
     Serial.println("ERROR: VL53L0X not found!");
@@ -398,7 +465,7 @@ void setup() {
   tof.startRangeContinuous();
   Serial.println("VL53L0X OK");
 
-  // ── MPU-6050 (mux ch2) ───────────────────────────────────────────────────
+  // MPU-6050 (mux ch2)
   muxSelect(MUX_CH_IMU);
   imu.initialize();
   if (!imu.testConnection()) {
@@ -421,9 +488,7 @@ void setup() {
   Serial.println("Ready. Waiting for start signal (pin 9)...");
 }
 
-// =============================================================================
 // MAIN LOOP
-// =============================================================================
 void loop() {
   switch (state) {
 

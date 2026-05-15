@@ -70,7 +70,7 @@
 #define MUX_CH_IMU      2    // MPU-6050
 
 // ── Sensor thresholds ────────────────────────────────────────────────────────
-#define EDGE_THRESHOLD   600   // TCRT5000 analog value — white line reads HIGH
+#define EDGE_THRESHOLD   1   // TCRT5000 analog value — white line reads HIGH, probably change? Originally was 600
                                // Calibrate: dark surface ~200, white >700
 #define TOF_ATTACK_MM    350   // Start full ram when opponent < this distance
 #define TOF_SCAN_MM      900   // Max detection range during scan
@@ -154,10 +154,11 @@ uint16_t readToF(uint8_t muxChannel) {
 // Returns true if ANY sensor sees white (boundary)
 // =============================================================================
 bool edgeDetected() {
-  bool fl = analogRead(PIN_EDGE_FL) > EDGE_THRESHOLD;
-  bool fr = analogRead(PIN_EDGE_FR) > EDGE_THRESHOLD;
-  bool rl = analogRead(PIN_EDGE_RL) > EDGE_THRESHOLD;
-  bool rr = analogRead(PIN_EDGE_RR) > EDGE_THRESHOLD;
+  // Assuming HIGH means white line is detected (need to test this)
+  bool fl = digitalRead(PIN_EDGE_FL) == HIGH;
+  bool fr = digitalRead(PIN_EDGE_FR) == HIGH;
+  bool rl = digitalRead(PIN_EDGE_RL) == HIGH;
+  bool rr = digitalRead(PIN_EDGE_RR) == HIGH;
   return (fl || fr || rl || rr);
 }
 

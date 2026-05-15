@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <Servo.h>
 #include <Adafruit_VL53L0X.h>
 #include <MPU6050.h>
 
@@ -10,8 +11,6 @@
 #define PIN_START        9
 #define PIN_MOTOR_L     10
 #define PIN_MOTOR_R     11
-#define PIN_DIR_L        2    // Motor 1 direction (left tread)  LOW=fwd HIGH=rev
-#define PIN_DIR_R        3    // Motor 2 direction (right tread) LOW=fwd HIGH=rev
 #define PIN_SOL_A       44   // Solenoid A — push-type, engages ratchet
 #define PIN_SOL_B       45   // Solenoid B — push-type, reinforces engagement
 
@@ -62,6 +61,7 @@ enum RobotState {
 
 // ── Globals ──────────────────────────────────────────────────────────────────
 RobotState       state       = STATE_WAIT;
+Servo            motorL, motorR;
 Adafruit_VL53L0X tof;
 MPU6050          imu(MPU6050_DEFAULT_ADDRESS, &Wire2);
 float            yawAccum    = 0.0f;
@@ -95,6 +95,7 @@ bool edgeDetected() {
 //  1 = right sensors triggered →  spin left to face inward
 //  0 = front/rear or both equal → reverse straight
 int edgeDirection() {
+  delayMicroseconds(500);  // same settle as edgeDetected() — consistent snapshot
   bool fl = digitalRead(PIN_EDGE_FL) == HIGH;
   bool fr = digitalRead(PIN_EDGE_FR) == HIGH;
   bool rl = digitalRead(PIN_EDGE_RL) == HIGH;
@@ -195,13 +196,13 @@ void trapRamp(int& current, int target, int step) {
   else if (current > target) current = max(current - step, target);
 }
 
+// Maps -PWM_MAX..+PWM_MAX → 1000..2000 µs (standard ESC range).
+// Negative = reverse, 0 = neutral/stop, positive = forward.
 void setMotors(int l, int r) {
   l = constrain(l, -PWM_MAX, PWM_MAX);
   r = constrain(r, -PWM_MAX, PWM_MAX);
-  digitalWrite(PIN_DIR_L, l >= 0 ? LOW : HIGH);
-  digitalWrite(PIN_DIR_R, r >= 0 ? LOW : HIGH);
-  analogWrite(PIN_MOTOR_L, abs(l));
-  analogWrite(PIN_MOTOR_R, abs(r));
+  motorL.writeMicroseconds(map(l, -PWM_MAX, PWM_MAX, 1000, 2000));
+  motorR.writeMicroseconds(map(r, -PWM_MAX, PWM_MAX, 1000, 2000));
 }
 
 // =============================================================================
@@ -376,9 +377,9 @@ void executeRam() {
 
     // Highest priority: edge abort — digitalRead via edgeDetected()
     if (edgeDetected()) {
-      releaseRatchet();  // blocks ~90ms — pawl must physically clear before reverse
       trapRamp(ramPWM, 0, ACCEL_STEP_STOP);
-      setMotors(0, 0);
+      setMotors(0, 0);      // stop before releasing — spring return needs no motor power
+      releaseRatchet();     // blocks ~35ms — spring returns pawl with motors idle
       state = STATE_RECOVER;
       return;
     }
@@ -406,7 +407,7 @@ void executeRam() {
     if (dist > TOF_SCAN_MM) {
       // Opponent escaped — release ratchet before any direction change
       Serial.println("Contact lost — releasing ratchet");
-      releaseRatchet();  // blocks ~90ms — safe to change direction after this
+      releaseRatchet();  // blocks ~35ms — safe to change direction after this
       trapRamp(ramPWM, 0, ACCEL_STEP_STOP);
       setMotors(0, 0);
       state = STATE_SCAN;
@@ -512,11 +513,12 @@ void setup() {
 
   // ── Other pins ────────────────────────────────────────────────────────────
   pinMode(PIN_START,   INPUT_PULLDOWN);
-  pinMode(PIN_DIR_L,   OUTPUT);
-  pinMode(PIN_DIR_R,   OUTPUT);
   pinMode(PIN_MOTOR_L, OUTPUT);
   pinMode(PIN_MOTOR_R, OUTPUT);
-  setMotors(0, 0);
+  motorL.attach(PIN_MOTOR_L, 1000, 2000);
+  motorR.attach(PIN_MOTOR_R, 1000, 2000);
+  setMotors(0, 0);   // output 1500 µs neutral — begins ESC arming sequence
+  delay(2000);        // hold neutral until ESC arms
 
   // ── I2C on Wire2 (pins 24=SCL2, 25=SDA2) ─────────────────────────────────
   // Note: pins 40/41 are not hardware I2C capable on Teensy 4.1.

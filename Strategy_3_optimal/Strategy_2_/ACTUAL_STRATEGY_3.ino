@@ -165,10 +165,10 @@ bool edgeDetected() {
 // Which side triggered? Used to determine recovery direction
 // Returns -1 = left, 1 = right, 0 = front/rear (reverse)
 int edgeDirection() {
-  bool fl = analogRead(PIN_EDGE_FL) > EDGE_THRESHOLD;
-  bool fr = analogRead(PIN_EDGE_FR) > EDGE_THRESHOLD;
-  bool rl = analogRead(PIN_EDGE_RL) > EDGE_THRESHOLD;
-  bool rr = analogRead(PIN_EDGE_RR) > EDGE_THRESHOLD;
+  bool fl = digitalRead(PIN_EDGE_FL) == HIGH;
+  bool fr = digitalRead(PIN_EDGE_FR) == HIGH;
+  bool rl = digitalRead(PIN_EDGE_RL) == HIGH;
+  bool rr = digitalRead(PIN_EDGE_RR) == HIGH;
   int leftCount  = (fl ? 1 : 0) + (rl ? 1 : 0);
   int rightCount = (fr ? 1 : 0) + (rr ? 1 : 0);
   if (leftCount > rightCount) return -1;

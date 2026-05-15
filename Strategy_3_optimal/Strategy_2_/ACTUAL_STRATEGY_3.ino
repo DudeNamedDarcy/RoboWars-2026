@@ -75,11 +75,19 @@ int16_t          gyroZOffset = 0;
 // If your modules output LOW on white, flip == HIGH to == LOW in both functions.
 // =============================================================================
 bool edgeDetected() {
-  bool fl = digitalRead(PIN_EDGE_FL) == HIGH;
-  bool fr = digitalRead(PIN_EDGE_FR) == HIGH;
-  bool rl = digitalRead(PIN_EDGE_RL) == HIGH;
-  bool rr = digitalRead(PIN_EDGE_RR) == HIGH;
-  return (fl || fr || rl || rr);
+  // Read all sensors
+  bool fl = digitalRead(PIN_EDGE_FL);
+  bool fr = digitalRead(PIN_EDGE_FR);
+  bool rl = digitalRead(PIN_EDGE_RL);
+  bool rr = digitalRead(PIN_EDGE_RR);
+  
+  if (fl || fr || rl || rr) {
+    delayMicroseconds(500); // Tiny wait to let noise settle
+    // Check again - if it's still high, it's a real line
+    return (digitalRead(PIN_EDGE_FL) || digitalRead(PIN_EDGE_FR) || 
+            digitalRead(PIN_EDGE_RL) || digitalRead(PIN_EDGE_RR));
+  }
+  return false;
 }
 
 // Returns which side triggered the edge — used to choose recovery spin direction.

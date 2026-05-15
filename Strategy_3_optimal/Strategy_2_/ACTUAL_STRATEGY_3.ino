@@ -11,19 +11,6 @@
 #define PIN_START        9
 #define PIN_MOTOR_L     10
 #define PIN_MOTOR_R     11
-#define PIN_SOL_A       44   // Solenoid A — push-type, engages ratchet
-#define PIN_SOL_B       45   // Solenoid B — push-type, reinforces engagement
-
-// ── Solenoid timing (ms) ─────────────────────────────────────────────────────
-#define SOLENOID_ENGAGE_MS   40   // Both solenoids push — full plunger travel
-#define SOLENOID_RELEASE_MS  35   // Spring return time after de-energise
-#define DEAD_TIME_MS         15   // Stagger between A and B on engage
-
-// ── Ratchet state tracking ───────────────────────────────────────────────────
-// Track ratchet state explicitly to avoid redundant solenoid pulses
-// and ensure safe sequencing
-enum RatchetState { RATCHET_FREE, RATCHET_ENGAGED, RATCHET_TRANSITIONING };
-RatchetState ratchetState = RATCHET_FREE;
 
 // ── TCA9548A I2C multiplexer ─────────────────────────────────────────────────
 #define MUX_ADDR      0x70
@@ -34,20 +21,21 @@ RatchetState ratchetState = RATCHET_FREE;
 // ── Sensor thresholds ────────────────────────────────────────────────────────
 #define TOF_ATTACK_MM   350
 #define TOF_SCAN_MM     900
-#define TOF_CONTACT_MM  120   // Distance at which we consider contact made
+#define TOF_CONTACT_MM  120
 
 // ── Motor control ────────────────────────────────────────────────────────────
 #define PWM_MAX         255
 #define PWM_SPIN        190
 #define PWM_RAM         255
+#define PWM_SCAN        120
 #define ACCEL_STEP_SPIN   8
-#define ACCEL_STEP_RAM    6   // Conservative for treads under load
+#define ACCEL_STEP_RAM    6
 #define ACCEL_STEP_STOP  20
 
 // ── Pivot parameters ─────────────────────────────────────────────────────────
 #define PIVOT_DEGREES   180.0f
-#define DECEL_ZONE_DEG   45.0f  // Wider than wheel version — accounts for tread inertia
-#define GYRO_SCALE     (1.0f / 131.0f)  // MPU-6050 default ±250°/s sensitivity
+#define DECEL_ZONE_DEG   45.0f
+#define GYRO_SCALE     (1.0f / 131.0f)  // MPU-6050 default ±250°/s
 
 // ── State machine ────────────────────────────────────────────────────────────
 enum RobotState {
@@ -70,32 +58,28 @@ int16_t          gyroZOffset = 0;
 
 // =============================================================================
 // EDGE DETECTION — digitalRead
-// Uses the DO pin of each TCRT5000 module.
 // WHITE LINE = DO HIGH (potentiometer-set threshold on module).
-// If your modules output LOW on white, flip == HIGH to == LOW in both functions.
+// If modules output LOW on white, flip == HIGH to == LOW in both functions.
 // =============================================================================
 bool edgeDetected() {
-  // Read all sensors
   bool fl = digitalRead(PIN_EDGE_FL);
   bool fr = digitalRead(PIN_EDGE_FR);
   bool rl = digitalRead(PIN_EDGE_RL);
   bool rr = digitalRead(PIN_EDGE_RR);
-  
+
   if (fl || fr || rl || rr) {
-    delayMicroseconds(500); // Tiny wait to let noise settle
-    // Check again - if it's still high, it's a real line
-    return (digitalRead(PIN_EDGE_FL) || digitalRead(PIN_EDGE_FR) || 
+    delayMicroseconds(500);
+    return (digitalRead(PIN_EDGE_FL) || digitalRead(PIN_EDGE_FR) ||
             digitalRead(PIN_EDGE_RL) || digitalRead(PIN_EDGE_RR));
   }
   return false;
 }
 
-// Returns which side triggered the edge — used to choose recovery spin direction.
-// -1 = left sensors triggered  →  spin right to face inward
-//  1 = right sensors triggered →  spin left to face inward
-//  0 = front/rear or both equal → reverse straight
+// -1 = left triggered  → spin right to face inward
+//  1 = right triggered → spin left to face inward
+//  0 = front/rear or equal → treat as centre
 int edgeDirection() {
-  delayMicroseconds(500);  // same settle as edgeDetected() — consistent snapshot
+  delayMicroseconds(500);
   bool fl = digitalRead(PIN_EDGE_FL) == HIGH;
   bool fr = digitalRead(PIN_EDGE_FR) == HIGH;
   bool rl = digitalRead(PIN_EDGE_RL) == HIGH;
@@ -103,59 +87,8 @@ int edgeDirection() {
   int leftCount  = (fl ? 1 : 0) + (rl ? 1 : 0);
   int rightCount = (fr ? 1 : 0) + (rr ? 1 : 0);
   if (leftCount > rightCount) return -1;
-  if (rightCount > leftCount)  return  1;
+  if (rightCount > leftCount) return  1;
   return 0;
-}
-
-// =============================================================================
-// SOLENOID CONTROL — safe two-solenoid ratchet API
-// Both solenoids are push-type (extend when energised).
-// ENGAGE  : A fires first, B fires after DEAD_TIME_MS — both push pawl into teeth.
-// RELEASE : both de-energise simultaneously — spring passively returns pawl.
-// No active push is used for release; spring alone clears the mechanism.
-// All ratchet operations go through these functions ONLY.
-// =============================================================================
-
-// engageRatchet()
-// Fires A then B (staggered by DEAD_TIME_MS) to push and hold pawl in teeth.
-// Blocks for full plunger travel. Safe to call if already engaged (no-op).
-void engageRatchet() {
-  if (ratchetState == RATCHET_ENGAGED) return;
-  ratchetState = RATCHET_TRANSITIONING;
-
-  digitalWrite(PIN_SOL_A, HIGH);           // primary push — pawl into teeth
-  delay(DEAD_TIME_MS);                     // stagger to reduce inrush overlap
-  digitalWrite(PIN_SOL_B, HIGH);           // reinforcing push — holds engagement
-  delay(SOLENOID_ENGAGE_MS);              // wait for full 10mm plunger travel
-
-  ratchetState = RATCHET_ENGAGED;
-  Serial.println("Ratchet: ENGAGED");
-}
-
-// releaseRatchet()
-// De-energises both solenoids. Spring passively returns pawl to free position.
-// MUST complete before any motor reversal.
-// Safe to call if already free (no-op).
-void releaseRatchet() {
-  if (ratchetState == RATCHET_FREE) return;
-  ratchetState = RATCHET_TRANSITIONING;
-
-  // Drop both simultaneously — no active push, spring does the work
-  digitalWrite(PIN_SOL_A, LOW);
-  digitalWrite(PIN_SOL_B, LOW);
-  delay(SOLENOID_RELEASE_MS);             // spring return travel time
-
-  ratchetState = RATCHET_FREE;
-  Serial.println("Ratchet: RELEASED");
-}
-
-// emergencyRelease()
-// Identical to releaseRatchet() but skips the state check — use in fault paths.
-void emergencyRelease() {
-  digitalWrite(PIN_SOL_A, LOW);
-  digitalWrite(PIN_SOL_B, LOW);
-  ratchetState = RATCHET_FREE;
-  Serial.println("Ratchet: EMERGENCY RELEASE");
 }
 
 // =============================================================================
@@ -166,7 +99,7 @@ void muxSelect(uint8_t channel) {
   Wire2.beginTransmission(MUX_ADDR);
   Wire2.write(1 << channel);
   Wire2.endTransmission();
-  delayMicroseconds(50);  // settle time
+  delayMicroseconds(50);
 }
 
 void muxDisableAll() {
@@ -182,10 +115,10 @@ uint16_t readToF(uint8_t muxChannel) {
   muxSelect(muxChannel);
   VL53L0X_RangingMeasurementData_t measure;
   tof.rangingTest(&measure, false);
-  if (measure.RangeStatus != 4) {  // 4 = out of range / no target
+  if (measure.RangeStatus != 4) {
     return constrain(measure.RangeMilliMeter, 0, 2000);
   }
-  return 2000;  // return max if no valid reading
+  return 2000;
 }
 
 // =============================================================================
@@ -209,9 +142,7 @@ void setMotors(int l, int r) {
 // GYRO
 // =============================================================================
 
-// calibrateGyro()
-// Averages 500 samples at rest to find zero offset.
-// Robot must be stationary during this call.
+// Averages 500 samples at rest to find zero-rate offset. Robot must be still.
 void calibrateGyro() {
   muxSelect(MUX_CH_IMU);
   long sum = 0;
@@ -226,11 +157,8 @@ void calibrateGyro() {
   Serial.println(gyroZOffset);
 }
 
-// headingCorrection()
-// Reads gyro Z rate and returns a differential PWM correction value.
 // Positive = drifting right → reduce right motor, increase left.
-// Gain of 0.4f: increase toward 0.8f if robot veers, decrease toward 0.2f
-// if it oscillates during ram.
+// Gain 0.4f: increase toward 0.8f if robot veers, decrease toward 0.2f if it oscillates.
 float headingCorrection() {
   muxSelect(MUX_CH_IMU);
   int16_t ax, ay, az, gx, gy, gz;
@@ -242,14 +170,12 @@ float headingCorrection() {
 // =============================================================================
 // STATE: PIVOT
 // 180° counter-rotating pivot timed by gyro Z integration.
-// Ratchet is guaranteed FREE before spin — engaging during a counter-rotate
-// would lock one tread asymmetrically and damage the mechanism.
+// Decel begins at DECEL_ZONE_DEG to prevent tread overshoot.
+// Opportunistic ToF abort in second half — transitions directly to RAM if
+// opponent detected at <TOF_ATTACK_MM before 180° complete.
 // =============================================================================
 void executePivot() {
   Serial.println("STATE: PIVOT");
-
-  // Guarantee ratchet is free before any spin
-  releaseRatchet();
 
   muxSelect(MUX_CH_IMU);
   yawAccum = 0.0f;
@@ -258,16 +184,12 @@ void executePivot() {
 
   while (abs(yawAccum) < PIVOT_DEGREES) {
 
-    // Edge abort during pivot — edgeDetected() uses digitalRead
     if (edgeDetected()) {
-      trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
       setMotors(0, 0);
-      // Ratchet already free — no release needed
       state = STATE_RECOVER;
       return;
     }
 
-    // Gyro integration
     uint32_t now = micros();
     float dt = (now - tLastUs) / 1e6f;
     tLastUs  = now;
@@ -277,28 +199,23 @@ void executePivot() {
     float rateZ = (gz - gyroZOffset) * GYRO_SCALE;
     yawAccum += rateZ * dt;
 
-    // Trapezoidal speed — decel in final DECEL_ZONE_DEG degrees
-    // Wider zone (45°) than wheels (30°) accounts for tread rotational inertia
     float remaining = PIVOT_DEGREES - abs(yawAccum);
     int targetSpd;
     if (remaining < DECEL_ZONE_DEG) {
       targetSpd = (int)map((long)remaining, 5, (long)DECEL_ZONE_DEG, 40, PWM_SPIN);
-      targetSpd = max(targetSpd, 40);  // minimum 40 to keep moving
+      targetSpd = max(targetSpd, 40);
     } else {
       targetSpd = PWM_SPIN;
     }
 
     trapRamp(spinPWM, targetSpd, ACCEL_STEP_SPIN);
-    setMotors(spinPWM, -spinPWM);  // counter-rotate treads
+    setMotors(spinPWM, -spinPWM);
 
-    // Opportunistic target check in second half of pivot
-    // If opponent detected before 180° complete, abort early and ram
     if (remaining < 90.0f) {
       uint16_t dist = readToF(MUX_CH_TOF_F);
-      muxSelect(MUX_CH_IMU);  // reselect IMU after ToF read
+      muxSelect(MUX_CH_IMU);
       if (dist < TOF_ATTACK_MM) {
         Serial.println("Target mid-pivot — transitioning to RAM");
-        trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
         setMotors(0, 0);
         state = STATE_RAM;
         return;
@@ -306,10 +223,8 @@ void executePivot() {
     }
   }
 
-  // Pivot complete — stop and transition to RAM
-  trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
   setMotors(0, 0);
-  delay(30);  // brief settle
+  delay(30);
   Serial.print("Pivot complete. Yaw: ");
   Serial.println(yawAccum);
   state = STATE_RAM;
@@ -317,14 +232,11 @@ void executePivot() {
 
 // =============================================================================
 // STATE: SCAN
-// Slow spin to locate opponent after pivot or contact loss.
-// Ratchet stays FREE — may need to spin any direction.
+// Slow clockwise spin at PWM_SCAN, ToF polled each tick.
+// Transitions to RAM on detection <TOF_SCAN_MM. 1500ms timeout then re-scan.
 // =============================================================================
 void executeScan() {
   Serial.println("STATE: SCAN");
-
-  // Ensure ratchet is free during scan
-  releaseRatchet();
 
   int scanPWM = 0;
   uint32_t scanStart = millis();
@@ -332,15 +244,13 @@ void executeScan() {
 
   while (millis() - scanStart < SCAN_TIMEOUT_MS) {
 
-    // Edge abort — digitalRead via edgeDetected()
     if (edgeDetected()) {
-      trapRamp(scanPWM, 0, ACCEL_STEP_STOP);
       setMotors(0, 0);
       state = STATE_RECOVER;
       return;
     }
 
-    trapRamp(scanPWM, 120, ACCEL_STEP_SPIN);
+    trapRamp(scanPWM, PWM_SCAN, ACCEL_STEP_SPIN);
     setMotors(scanPWM, -scanPWM);
 
     uint16_t dist = readToF(MUX_CH_TOF_F);
@@ -348,26 +258,19 @@ void executeScan() {
       Serial.print("Target at ");
       Serial.print(dist);
       Serial.println(" mm — transitioning to RAM");
-      trapRamp(scanPWM, 0, ACCEL_STEP_STOP);
       setMotors(0, 0);
       state = STATE_RAM;
       return;
     }
   }
 
-  // Timeout — state stays SCAN, loop() will call again
   Serial.println("Scan timeout — continuing");
 }
 
 // =============================================================================
 // STATE: RAM
 // Full-speed attack with trapezoidal ramp and IMU heading hold.
-// Engages ratchet on contact, releases before any direction change.
-//
-// Critical solenoid ordering:
-//   Edge detected  → releaseRatchet() FIRST, then stop motors
-//   Contact lost   → releaseRatchet() FIRST, then transition to SCAN
-//   Motors must NEVER reverse while ratchet is ENGAGED.
+// Transitions to RECOVER on edge detection, SCAN on contact loss.
 // =============================================================================
 void executeRam() {
   Serial.println("STATE: RAM");
@@ -375,40 +278,23 @@ void executeRam() {
 
   while (true) {
 
-    // Highest priority: edge abort — digitalRead via edgeDetected()
     if (edgeDetected()) {
-      trapRamp(ramPWM, 0, ACCEL_STEP_STOP);
-      setMotors(0, 0);      // stop before releasing — spring return needs no motor power
-      releaseRatchet();     // blocks ~35ms — spring returns pawl with motors idle
+      setMotors(0, 0);
       state = STATE_RECOVER;
       return;
     }
 
-    // Trapezoidal ramp to full speed
-    // ACCEL_STEP_RAM = 6 (slower than spin) — maximises torque under tread load
     trapRamp(ramPWM, PWM_RAM, ACCEL_STEP_RAM);
 
-    // IMU heading correction — keeps treads straight during ram
     float correction = headingCorrection();
     int corrL = constrain((int)(ramPWM - correction), 0, PWM_MAX);
     int corrR = constrain((int)(ramPWM + correction), 0, PWM_MAX);
     setMotors(corrL, corrR);
 
-    // ToF contact management
     uint16_t dist = readToF(MUX_CH_TOF_F);
 
-    if (dist < TOF_CONTACT_MM && ratchetState == RATCHET_FREE) {
-      // Contact made — lock ratchet to hold pushing position.
-      // Motors hold last PWM during ~55ms blocking engage call — fine because
-      // physical contact is already made; solenoid locks the pushing position.
-      engageRatchet();
-    }
-
     if (dist > TOF_SCAN_MM) {
-      // Opponent escaped — release ratchet before any direction change
-      Serial.println("Contact lost — releasing ratchet");
-      releaseRatchet();  // blocks ~35ms — safe to change direction after this
-      trapRamp(ramPWM, 0, ACCEL_STEP_STOP);
+      Serial.println("Contact lost — transitioning to SCAN");
       setMotors(0, 0);
       state = STATE_SCAN;
       return;
@@ -418,33 +304,25 @@ void executeRam() {
 
 // =============================================================================
 // STATE: RECOVER
-// Called after edge detection from any state.
-// Ratchet is guaranteed FREE on entry (calling state releases first).
-// Reverse away from boundary, pivot 90° via IMU, return to SCAN.
+// Reverse 350ms away from boundary, then IMU-timed 90° pivot away from the
+// triggering side. Edge detection active during pivot — re-enters RECOVER with
+// a fresh direction read if a second boundary is hit.
 // =============================================================================
 void executeRecover() {
   Serial.println("STATE: RECOVER");
 
-  // Safety guarantee — no-op if already free
-  releaseRatchet();
-
-  // Capture edge direction before reversing clears the sensors
   int dir = edgeDirection();
 
   int recPWM = 0;
-
-  // Reverse away from boundary
   uint32_t tReverse = millis();
   while (millis() - tReverse < 350) {
     trapRamp(recPWM, 150, ACCEL_STEP_STOP);
     setMotors(-recPWM, -recPWM);
   }
 
-  trapRamp(recPWM, 0, ACCEL_STEP_STOP);
   setMotors(0, 0);
   delay(20);
 
-  // 90° recovery pivot using IMU
   muxSelect(MUX_CH_IMU);
   yawAccum = 0.0f;
   tLastUs  = micros();
@@ -452,11 +330,9 @@ void executeRecover() {
 
   while (abs(yawAccum) < 90.0f) {
 
-    // Edge check during recovery pivot — prevents spinning into a second boundary
     if (edgeDetected()) {
-      trapRamp(pivPWM, 0, ACCEL_STEP_STOP);
       setMotors(0, 0);
-      state = STATE_RECOVER;  // re-enter with fresh direction reading
+      state = STATE_RECOVER;
       return;
     }
 
@@ -469,17 +345,14 @@ void executeRecover() {
     float rateZ = (gz - gyroZOffset) * GYRO_SCALE;
     yawAccum += rateZ * dt;
 
-    // Decel in last 20° of recovery pivot
     float rem = 90.0f - abs(yawAccum);
     int tgt = (rem < 20.0f) ? 50 : 130;
     trapRamp(pivPWM, tgt, 6);
 
-    // Spin away from the edge that triggered
-    if (dir >= 0) setMotors(-pivPWM,  pivPWM);  // spin left
-    else          setMotors( pivPWM, -pivPWM);   // spin right
+    if (dir >= 0) setMotors(-pivPWM,  pivPWM);
+    else          setMotors( pivPWM, -pivPWM);
   }
 
-  trapRamp(pivPWM, 0, ACCEL_STEP_STOP);
   setMotors(0, 0);
   delay(20);
   state = STATE_SCAN;
@@ -492,20 +365,9 @@ void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 3000);
 
-  // ── Solenoid pins — set LOW before anything else ──────────────────────────
-  // Both push-type: LOW = de-energised = spring holds pawl free.
-  // 10kΩ pulldown on each MOSFET gate covers boot float, but explicit LOW
-  // here guarantees correct state from the very first instruction.
-  pinMode(PIN_SOL_A, OUTPUT);
-  pinMode(PIN_SOL_B, OUTPUT);
-  digitalWrite(PIN_SOL_A, LOW);
-  digitalWrite(PIN_SOL_B, LOW);
-  ratchetState = RATCHET_FREE;
-
-  // ── Edge sensor pins — INPUT_PULLDOWN ─────────────────────────────────────
-  // TCRT5000 DO pin is active-HIGH driven by onboard comparator.
-  // INPUT_PULLDOWN ensures defined LOW if a sensor is disconnected,
-  // preventing a floating pin from triggering a false edge detection.
+  // ── Edge sensor pins ──────────────────────────────────────────────────────
+  // INPUT_PULLDOWN: floating pin reads LOW, preventing false triggers if
+  // a sensor is disconnected.
   pinMode(PIN_EDGE_FL, INPUT_PULLDOWN);
   pinMode(PIN_EDGE_FR, INPUT_PULLDOWN);
   pinMode(PIN_EDGE_RL, INPUT_PULLDOWN);
@@ -517,16 +379,13 @@ void setup() {
   pinMode(PIN_MOTOR_R, OUTPUT);
   motorL.attach(PIN_MOTOR_L, 1000, 2000);
   motorR.attach(PIN_MOTOR_R, 1000, 2000);
-  setMotors(0, 0);   // output 1500 µs neutral — begins ESC arming sequence
-  delay(2000);        // hold neutral until ESC arms
+  setMotors(0, 0);   // 1500 µs neutral — begins ESC arming sequence
+  delay(2000);
 
   // ── I2C on Wire2 (pins 24=SCL2, 25=SDA2) ─────────────────────────────────
-  // Note: pins 40/41 are not hardware I2C capable on Teensy 4.1.
-  // Wire2 is the closest native hardware bus to the requested pins.
   Wire2.begin();
-  Wire2.setClock(400000);  // 400 kHz fast-mode — VL53L0X and MPU-6050 both support this
+  Wire2.setClock(400000);
 
-  // ── TCA9548A mux ──────────────────────────────────────────────────────────
   muxDisableAll();
 
   // ── VL53L0X (mux ch0) ────────────────────────────────────────────────────
@@ -535,7 +394,7 @@ void setup() {
     Serial.println("ERROR: VL53L0X not found!");
     while (1);
   }
-  tof.setMeasurementTimingBudgetMicroSeconds(20000);  // 20ms — fast mode
+  tof.setMeasurementTimingBudgetMicroSeconds(20000);
   tof.startRangeContinuous();
   Serial.println("VL53L0X OK");
 
@@ -546,31 +405,18 @@ void setup() {
     Serial.println("ERROR: MPU-6050 not found!");
     while (1);
   }
-  imu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);   // ±250°/s for precision pivots
-  imu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);   // ±2g for contact detection
+  imu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
+  imu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
   Serial.println("MPU-6050 OK");
 
-  // ── Gyro calibration — robot must be stationary ───────────────────────────
   Serial.println("Calibrating gyro — hold still...");
   calibrateGyro();
 
-  // ── Edge sensor sanity check ──────────────────────────────────────────────
-  // All four should read 0 on the dark dohyo surface at startup.
-  // If any read 1, the pot threshold is too sensitive or sensor is misaligned.
   Serial.println("Edge sensor check (all should be 0 on dark surface):");
   Serial.print("  FL="); Serial.print(digitalRead(PIN_EDGE_FL));
   Serial.print("  FR="); Serial.print(digitalRead(PIN_EDGE_FR));
   Serial.print("  RL="); Serial.print(digitalRead(PIN_EDGE_RL));
   Serial.print("  RR="); Serial.println(digitalRead(PIN_EDGE_RR));
-
-  // ── Solenoid self-test ────────────────────────────────────────────────────
-  // Fires both solenoids sequentially. Listen for two distinct clicks.
-  // Comment out for competition if startup delay is a concern.
-  Serial.println("Solenoid self-test...");
-  engageRatchet();
-  delay(200);
-  releaseRatchet();
-  Serial.println("Solenoid self-test complete.");
 
   Serial.println("Ready. Waiting for start signal (pin 9)...");
 }
@@ -584,7 +430,7 @@ void loop() {
     case STATE_WAIT:
       if (digitalRead(PIN_START) == HIGH) {
         Serial.println("Start!");
-        delay(5000);  // mandatory wait — adjust per ruleset
+        delay(5000);
         state = STATE_PIVOT;
       }
       break;
@@ -607,7 +453,6 @@ void loop() {
 
     case STATE_HALT:
     default:
-      emergencyRelease();
       setMotors(0, 0);
       break;
   }

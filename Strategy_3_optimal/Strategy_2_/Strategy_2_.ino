@@ -10,7 +10,6 @@
   Note that a lot of these are temp values that are to be updated later since we dont currently have the robot.
   THIS IS NOT READY FOR TESTING YET
 
-  Yo Max this code might be bad sorry in advance
 */
 
 // I2C addresses (to be confirmed later)

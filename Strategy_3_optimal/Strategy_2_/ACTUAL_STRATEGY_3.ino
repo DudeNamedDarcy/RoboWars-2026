@@ -10,14 +10,15 @@
 #define PIN_START        9
 #define PIN_MOTOR_L     10
 #define PIN_MOTOR_R     11
-#define PIN_SOL_ENGAGE  44   // Solenoid A — pushes pawl INTO teeth
-#define PIN_SOL_RELEASE 45   // Solenoid B — pushes pawl OUT of teeth
+#define PIN_DIR_L        2    // Motor 1 direction (left tread)  LOW=fwd HIGH=rev
+#define PIN_DIR_R        3    // Motor 2 direction (right tread) LOW=fwd HIGH=rev
+#define PIN_SOL_A       44   // Solenoid A — push-type, engages ratchet
+#define PIN_SOL_B       45   // Solenoid B — push-type, reinforces engagement
 
 // ── Solenoid timing (ms) ─────────────────────────────────────────────────────
-#define SOLENOID_ENGAGE_MS   40   // Time for engage plunger to fully travel
-#define SOLENOID_RELEASE_MS  35   // Time for release plunger to clear pawl
-#define DEAD_TIME_MS         15   // Gap between A and B commands — never overlap
-                                  // Increase to 25ms if mechanism is stiff
+#define SOLENOID_ENGAGE_MS   40   // Both solenoids push — full plunger travel
+#define SOLENOID_RELEASE_MS  35   // Spring return time after de-energise
+#define DEAD_TIME_MS         15   // Stagger between A and B on engage
 
 // ── Ratchet state tracking ───────────────────────────────────────────────────
 // Track ratchet state explicitly to avoid redundant solenoid pulses
@@ -62,7 +63,7 @@ enum RobotState {
 // ── Globals ──────────────────────────────────────────────────────────────────
 RobotState       state       = STATE_WAIT;
 Adafruit_VL53L0X tof;
-MPU6050          imu;
+MPU6050          imu(MPU6050_DEFAULT_ADDRESS, &Wire2);
 float            yawAccum    = 0.0f;
 uint32_t         tLastUs     = 0;
 int16_t          gyroZOffset = 0;
@@ -99,63 +100,51 @@ int edgeDirection() {
 
 // =============================================================================
 // SOLENOID CONTROL — safe two-solenoid ratchet API
+// Both solenoids are push-type (extend when energised).
+// ENGAGE  : A fires first, B fires after DEAD_TIME_MS — both push pawl into teeth.
+// RELEASE : both de-energise simultaneously — spring passively returns pawl.
+// No active push is used for release; spring alone clears the mechanism.
 // All ratchet operations go through these functions ONLY.
-// Never write directly to PIN_SOL_ENGAGE or PIN_SOL_RELEASE elsewhere.
 // =============================================================================
 
 // engageRatchet()
-// Pushes pawl into teeth and holds. Blocks for solenoid travel time.
-// Safe to call if already engaged (no-op with check).
+// Fires A then B (staggered by DEAD_TIME_MS) to push and hold pawl in teeth.
+// Blocks for full plunger travel. Safe to call if already engaged (no-op).
 void engageRatchet() {
-  if (ratchetState == RATCHET_ENGAGED) return;  // already locked, skip
+  if (ratchetState == RATCHET_ENGAGED) return;
   ratchetState = RATCHET_TRANSITIONING;
 
-  // Safety: ensure release solenoid is off before engaging
-  digitalWrite(PIN_SOL_RELEASE, LOW);
-  delay(DEAD_TIME_MS);  // wait for B to fully de-energize and plunger to retract
-
-  // Energize engage solenoid — plunger pushes pawl into ratchet teeth
-  digitalWrite(PIN_SOL_ENGAGE, HIGH);
-  delay(SOLENOID_ENGAGE_MS);  // wait for full 10mm plunger travel
+  digitalWrite(PIN_SOL_A, HIGH);           // primary push — pawl into teeth
+  delay(DEAD_TIME_MS);                     // stagger to reduce inrush overlap
+  digitalWrite(PIN_SOL_B, HIGH);           // reinforcing push — holds engagement
+  delay(SOLENOID_ENGAGE_MS);              // wait for full 10mm plunger travel
 
   ratchetState = RATCHET_ENGAGED;
   Serial.println("Ratchet: ENGAGED");
 }
 
 // releaseRatchet()
-// Clears pawl from teeth with a timed pulse. Blocks for mechanical travel.
-// MUST be called before any motor reversal.
+// De-energises both solenoids. Spring passively returns pawl to free position.
+// MUST complete before any motor reversal.
 // Safe to call if already free (no-op).
 void releaseRatchet() {
-  if (ratchetState == RATCHET_FREE) return;  // already free, skip
+  if (ratchetState == RATCHET_FREE) return;
   ratchetState = RATCHET_TRANSITIONING;
 
-  // Step 1: de-energize engage solenoid — spring begins returning
-  digitalWrite(PIN_SOL_ENGAGE, LOW);
-  delay(DEAD_TIME_MS);  // mandatory dead time — let spring start returning
-                        // before B fires into the mechanism
-
-  // Step 2: pulse release solenoid to positively clear the pawl
-  // Don't hold this — it's a push-to-clear, not a hold
-  digitalWrite(PIN_SOL_RELEASE, HIGH);
-  delay(SOLENOID_RELEASE_MS);  // 10mm plunger travel to clear pawl
-
-  // Step 3: de-energize release solenoid
-  // Holding it wastes current (2A continuous = 24W, heats coil)
-  // and blocks re-engagement. Always release after pawl clears.
-  digitalWrite(PIN_SOL_RELEASE, LOW);
-  delay(DEAD_TIME_MS);  // settle before motors are allowed to reverse
+  // Drop both simultaneously — no active push, spring does the work
+  digitalWrite(PIN_SOL_A, LOW);
+  digitalWrite(PIN_SOL_B, LOW);
+  delay(SOLENOID_RELEASE_MS);             // spring return travel time
 
   ratchetState = RATCHET_FREE;
   Serial.println("Ratchet: RELEASED");
 }
 
 // emergencyRelease()
-// Non-blocking version for fault conditions.
-// Sets both LOW immediately — relies on spring return only (no active push).
+// Identical to releaseRatchet() but skips the state check — use in fault paths.
 void emergencyRelease() {
-  digitalWrite(PIN_SOL_ENGAGE,  LOW);
-  digitalWrite(PIN_SOL_RELEASE, LOW);
+  digitalWrite(PIN_SOL_A, LOW);
+  digitalWrite(PIN_SOL_B, LOW);
   ratchetState = RATCHET_FREE;
   Serial.println("Ratchet: EMERGENCY RELEASE");
 }
@@ -201,8 +190,8 @@ void trapRamp(int& current, int target, int step) {
 void setMotors(int l, int r) {
   l = constrain(l, -PWM_MAX, PWM_MAX);
   r = constrain(r, -PWM_MAX, PWM_MAX);
-  // If your motor driver uses separate DIR + PWM pins, add direction
-  // digitalWrite calls here before the analogWrite calls.
+  digitalWrite(PIN_DIR_L, l >= 0 ? LOW : HIGH);
+  digitalWrite(PIN_DIR_R, r >= 0 ? LOW : HIGH);
   analogWrite(PIN_MOTOR_L, abs(l));
   analogWrite(PIN_MOTOR_R, abs(r));
 }
@@ -495,13 +484,13 @@ void setup() {
   while (!Serial && millis() < 3000);
 
   // ── Solenoid pins — set LOW before anything else ──────────────────────────
-  // Most critical setup order: establish LOW on both solenoid pins before
-  // Wire, sensors, or any other init. 10kΩ pulldown on MOSFET gate handles
-  // boot float, but explicit LOW here ensures correct state from first instruction.
-  pinMode(PIN_SOL_ENGAGE,  OUTPUT);
-  pinMode(PIN_SOL_RELEASE, OUTPUT);
-  digitalWrite(PIN_SOL_ENGAGE,  LOW);   // ratchet free at startup
-  digitalWrite(PIN_SOL_RELEASE, LOW);
+  // Both push-type: LOW = de-energised = spring holds pawl free.
+  // 10kΩ pulldown on each MOSFET gate covers boot float, but explicit LOW
+  // here guarantees correct state from the very first instruction.
+  pinMode(PIN_SOL_A, OUTPUT);
+  pinMode(PIN_SOL_B, OUTPUT);
+  digitalWrite(PIN_SOL_A, LOW);
+  digitalWrite(PIN_SOL_B, LOW);
   ratchetState = RATCHET_FREE;
 
   // ── Edge sensor pins — INPUT_PULLDOWN ─────────────────────────────────────
@@ -515,6 +504,8 @@ void setup() {
 
   // ── Other pins ────────────────────────────────────────────────────────────
   pinMode(PIN_START,   INPUT_PULLDOWN);
+  pinMode(PIN_DIR_L,   OUTPUT);
+  pinMode(PIN_DIR_R,   OUTPUT);
   pinMode(PIN_MOTOR_L, OUTPUT);
   pinMode(PIN_MOTOR_R, OUTPUT);
   setMotors(0, 0);

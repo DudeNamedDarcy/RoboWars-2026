@@ -490,12 +490,18 @@ void setup() {
 
 // MAIN LOOP
 void loop() {
+  // Global safety check: If we have already started, but the signal drops LOW, we can then force a halt!
+  if (state != STATE_WAIT && digitalRead(PIN_START) == LOW) {
+    Serial.println("Stop signal detected! Halting...");
+    state = STATE_HALT;
+  }
+
+
   switch (state) {
 
     case STATE_WAIT:
       if (digitalRead(PIN_START) == HIGH) {
         Serial.println("Start!");
-        delay(5000);
         state = STATE_PIVOT;
       }
       break;

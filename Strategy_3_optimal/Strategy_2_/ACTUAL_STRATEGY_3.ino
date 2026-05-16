@@ -5,7 +5,7 @@
 #define PIN_EDGE_FR  15
 #define PIN_EDGE_RL  16
 #define PIN_EDGE_RR  17
-#define PIN_START        13   // Start module
+#define PIN_START        21   // Start module
 #define PIN_MOTOR_L      11   // Motor 1 PWM (left tread)
 #define PIN_MOTOR_R      12   // Motor 2 PWM (right tread)
 

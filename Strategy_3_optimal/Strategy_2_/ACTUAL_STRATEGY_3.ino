@@ -14,7 +14,7 @@
 #define PIN_MOTOR_R     11
 
 // Put your calibrated offset at the top of your main script
-int tofOffsetMm =  12;  // Change this to whatever your calibration function prints out, default backup is 12
+float tofOffsetMm = 12.0f;  // Change this to whatever your calibration function prints out, default backup is 12
 
 // Multiplexer variable declarations
 #define MUX_ADDR      0x70
@@ -124,7 +124,11 @@ void muxDisableAll() {
 }
 
 // Note the '&' to pass the actual sensor object, not a copy
-int calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
+float calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
+  // Explicitly select ToF mux channel — keeps this function safe regardless
+  // of whatever channel was selected before it was called
+  muxSelect(MUX_CH_TOF_F);
+
   Serial.println("\n--- Starting VL53L0X Calibration ---");
   Serial.println("Place a white target exactly 100mm away from the sensor.");
   Serial.println("Starting in 5 seconds... Keep completely still.");
@@ -144,6 +148,9 @@ int calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
   // We can pass a manual offset correction if you notice a consistent error.
   // However, the cleanest way to do this at runtime with the Adafruit wrapper
   // is to take an average of readings and calculate a manual offset modifier.
+
+  // Declare offset before the if block so it is in scope for the return
+  float offset = 0.0f;
   
   long sum = 0;
   const int samples = 50;
@@ -163,7 +170,7 @@ int calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
   if (validSamples > 0) {
     float averageReading = (float)sum / validSamples;
     // Calculate the systematic error (Offset)
-    float offset = targetDistanceMm - averageReading;
+    offset = targetDistanceMm - averageReading;
     
     Serial.print("Calibration Complete.");
     Serial.print(" Expected: 100mm | Average Measured: ");
@@ -179,8 +186,6 @@ int calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
   return offset;
 }
 
-
-
 // ToF Function used by your states
 uint16_t readToF(uint8_t muxChannel) {
   muxSelect(muxChannel);
@@ -194,10 +199,6 @@ uint16_t readToF(uint8_t muxChannel) {
   }
   return 2000;
 }
-
-
-
-
 
 // MOTOR Logic
 void trapRamp(int& current, int target, int step) {
@@ -521,7 +522,8 @@ void executeRecover() {
 // =============================================================================
 void setup() {
   Serial.begin(115200);
-  while (!Serial && millis() < 3000);
+  // Removed: while (!Serial && millis() < 3000) — causes 3s stall in competition
+  // where no USB is connected. Remove for competition, restore for debugging.
 
   // Edge sensor pins
   // INPUT_PULLDOWN: floating pin reads LOW, preventing false triggers if

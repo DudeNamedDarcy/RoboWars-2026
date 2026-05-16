@@ -33,6 +33,9 @@
 #define MOTOR_1_PIN 10
 #define MOTOR_2_PIN 11
 
+// Put your calibrated offset at the top of your main script
+#define TOF_OFFSET_MM  12  // Change this to whatever your calibration function prints out
+
 // SDA/SCL (to be clarified later)
 #define I2C_SDA 44
 #define I2C_SCL 45
@@ -82,6 +85,85 @@ int right_hit = 0;
 int center_hit = 0;
 
 last_seen = LEFT;
+
+
+// Note the '&' to pass the actual sensor object, not a copy
+void calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
+  Serial.println("\n--- Starting VL53L0X Calibration ---");
+  Serial.println("Place a white target exactly 100mm away from the sensor.");
+  Serial.println("Starting in 5 seconds... Keep completely still.");
+  delay(5000);
+
+  // 1. Perform Temperature / VHV (Very High Voltage) Calibration
+  // This is typically handled internally by the API during initialization,
+  // but we can force a clear tuning sequence here.
+  Serial.println("Calibrating internal tuning...");
+  
+  // 2. Data Initialization
+  // We call the underlying ST API to trigger a manual offset calibration
+  // The ST API expects the target to be at 100 mm.
+  uint32_t targetDistanceMm = 100; 
+  
+  // The underlying library uses standard ST API calls. 
+  // We can pass a manual offset correction if you notice a consistent error.
+  // However, the cleanest way to do this at runtime with the Adafruit wrapper
+  // is to take an average of readings and calculate a manual offset modifier.
+  
+  long sum = 0;
+  const int samples = 50;
+  int validSamples = 0;
+  
+  for (int i = 0; i < samples; i++) {
+    VL53L0X_RangingMeasurementData_t measure;
+    sensor.rangingTest(&measure, false);
+    
+    if (measure.RangeStatus == 0) { // 0 means valid reading
+      sum += measure.RangeMilliMeter;
+      validSamples++;
+    }
+    delay(30);
+  }
+
+  if (validSamples > 0) {
+    float averageReading = (float)sum / validSamples;
+    // Calculate the systematic error (Offset)
+    float offset = targetDistanceMm - averageReading;
+    
+    Serial.print("Calibration Complete.");
+    Serial.print(" Expected: 100mm | Average Measured: ");
+    Serial.print(averageReading);
+    Serial.print("mm | Calculated Offset: ");
+    Serial.println(offset);
+    
+    Serial.println("Apply this offset value to your readToF() measurements!");
+  } else {
+    Serial.println("Calibration FAILED: No valid readings detected.");
+  }
+  Serial.println("-------------------------------------\n");
+  return offset;
+}
+
+uint16_t readToF(uint8_t muxChannel) {
+  // 1. Custom MUX logic (Not native to the sensor)
+  muxSelect(muxChannel); 
+  
+  // 2. Native Adafruit Library Object & Struct
+  VL53L0X_RangingMeasurementData_t measure; 
+  
+  // 3. Native Adafruit function that actually talks to the hardware
+  tof.rangingTest(&measure, false); 
+  
+  // 4. Custom data-cleaning logic
+  if (measure.RangeStatus != 4) { 
+    return constrain(measure.RangeMilliMeter, 0, 2000);
+  }
+  
+  // 5. Custom default value if nothing is in front of the robot
+  return 2000; 
+}
+
+
+
 
 // MUX Communication, controls 8 different i2c buses: channels 0-7
 void tcaSelect(uint8_t channel) {

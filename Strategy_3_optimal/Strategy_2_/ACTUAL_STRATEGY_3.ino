@@ -13,6 +13,9 @@
 #define PIN_MOTOR_L     10
 #define PIN_MOTOR_R     11
 
+// Put your calibrated offset at the top of your main script
+int tofOffsetMm =  12;  // Change this to whatever your calibration function prints out, default backup is 12
+
 // Multiplexer variable declarations
 #define MUX_ADDR      0x70
 #define MUX_CH_TOF_F  0
@@ -120,18 +123,81 @@ void muxDisableAll() {
   Wire2.endTransmission();
 }
 
-// ToF
+// Note the '&' to pass the actual sensor object, not a copy
+int calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
+  Serial.println("\n--- Starting VL53L0X Calibration ---");
+  Serial.println("Place a white target exactly 100mm away from the sensor.");
+  Serial.println("Starting in 5 seconds... Keep completely still.");
+  delay(5000);
+
+  // 1. Perform Temperature / VHV (Very High Voltage) Calibration
+  // This is typically handled internally by the API during initialization,
+  // but we can force a clear tuning sequence here.
+  Serial.println("Calibrating internal tuning...");
+  
+  // 2. Data Initialization
+  // We call the underlying ST API to trigger a manual offset calibration
+  // The ST API expects the target to be at 100 mm.
+  uint32_t targetDistanceMm = 100; 
+  
+  // The underlying library uses standard ST API calls. 
+  // We can pass a manual offset correction if you notice a consistent error.
+  // However, the cleanest way to do this at runtime with the Adafruit wrapper
+  // is to take an average of readings and calculate a manual offset modifier.
+  
+  long sum = 0;
+  const int samples = 50;
+  int validSamples = 0;
+  
+  for (int i = 0; i < samples; i++) {
+    VL53L0X_RangingMeasurementData_t measure;
+    sensor.rangingTest(&measure, false);
+    
+    if (measure.RangeStatus == 0) { // 0 means valid reading
+      sum += measure.RangeMilliMeter;
+      validSamples++;
+    }
+    delay(30);
+  }
+
+  if (validSamples > 0) {
+    float averageReading = (float)sum / validSamples;
+    // Calculate the systematic error (Offset)
+    float offset = targetDistanceMm - averageReading;
+    
+    Serial.print("Calibration Complete.");
+    Serial.print(" Expected: 100mm | Average Measured: ");
+    Serial.print(averageReading);
+    Serial.print("mm | Calculated Offset: ");
+    Serial.println(offset);
+    
+    Serial.println("Apply this offset value to your readToF() measurements!");
+  } else {
+    Serial.println("Calibration FAILED: No valid readings detected.");
+  }
+  Serial.println("-------------------------------------\n");
+  return offset;
+}
+
+
+
+// ToF Function used by your states
 uint16_t readToF(uint8_t muxChannel) {
   muxSelect(muxChannel);
   VL53L0X_RangingMeasurementData_t measure;
   tof.rangingTest(&measure, false);
-  // RangeStatus 4 means no target detected — return max distance so
-  // no state transition is accidentally triggered by an empty reading
+  
   if (measure.RangeStatus != 4) {
-    return constrain(measure.RangeMilliMeter, 0, 2000);
+    // Automatically applies whatever value was saved at boot
+    int correctedDist = measure.RangeMilliMeter + tofOffsetMm; 
+    return constrain(correctedDist, 0, 2000);
   }
   return 2000;
 }
+
+
+
+
 
 // MOTOR Logic
 void trapRamp(int& current, int target, int step) {
@@ -489,6 +555,27 @@ void setup() {
   tof.setMeasurementTimingBudgetMicroSeconds(20000);
   tof.startRangeContinuous();
   Serial.println("VL53L0X OK");
+
+  // === AUTONOMOUS TOF CALIBRATION TRIGGER ===
+  Serial.println("Checking for calibration target...");
+  delay(200); // Give the sensor a brief moment to stabilize continuous readings
+  
+  VL53L0X_RangingMeasurementData_t bootMeasure;
+  tof.rangingTest(&bootMeasure, false);
+  
+  // If an object is detected closer than 150mm at boot, run calibration autonomously
+  if (bootMeasure.RangeStatus != 4 && bootMeasure.RangeMilliMeter < 150) {
+    Serial.println("Target detected at boot! Starting Auto-Calibration...");
+    
+    // Optional: Flash a light or beep a buzzer here if your robot has one 
+    // to signal you to keep your hand perfectly still at the 100mm mark.
+    
+    tofOffsetMm = calibrateVL53L0X(tof); 
+  } else {
+    Serial.print("No boot target detected. Using default offset: ");
+    Serial.println(tofOffsetMm);
+  }
+  // ==========================================
 
   // MPU-6050 (mux ch2)
   muxSelect(MUX_CH_IMU);

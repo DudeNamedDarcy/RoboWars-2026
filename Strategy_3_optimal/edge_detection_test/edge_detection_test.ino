@@ -27,10 +27,10 @@ void setMotors(int l, int r) {
 // Bit 0 = FL, Bit 1 = FR, Bit 2 = RL, Bit 3 = RR
 uint8_t sampleEdges() {
   uint8_t mask = 0;
-  if (digitalRead(PIN_EDGE_FL)) mask |= (1 << 0);
+  if (digitalRead(PIN_EDGE_FL)) mask |= (1 << 0); //binary change so 0000000 becomes ....0000001
   if (digitalRead(PIN_EDGE_FR)) mask |= (1 << 1);
   if (digitalRead(PIN_EDGE_RL)) mask |= (1 << 2);
-  if (digitalRead(PIN_EDGE_RR)) mask |= (1 << 3);
+  if (digitalRead(PIN_EDGE_RR)) mask |= (1 << 3); //binary change so 0000000 becomes ....0001000
   return mask;
 }
 
@@ -40,7 +40,7 @@ uint8_t readEdgesDebounced() {
   uint8_t first = sampleEdges();
   if (first == 0) return 0;
   delayMicroseconds(500);
-  return sampleEdges() & first;
+  return sampleEdges() & first; //will be false if both 0000
 }
 
 void printStatus(uint8_t edges) {

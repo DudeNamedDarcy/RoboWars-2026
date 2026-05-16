@@ -5,13 +5,13 @@
 
 // for all tweaks regarding variables (small changes that could result in decent changes in the programming)
 // change these if you don't like certain behavior
-#define PIN_EDGE_FL      5    
-#define PIN_EDGE_FR      6   
-#define PIN_EDGE_RL      7    
-#define PIN_EDGE_RR      8    
-#define PIN_START        9
-#define PIN_MOTOR_L     10
-#define PIN_MOTOR_R     11
+#define PIN_EDGE_FL      3
+#define PIN_EDGE_FR      4
+#define PIN_EDGE_RL      5
+#define PIN_EDGE_RR      6
+#define PIN_START        7    // ← confirm this — old pin 9 now conflicts with PIN_MOTOR_R
+#define PIN_MOTOR_L      8
+#define PIN_MOTOR_R      9
 
 // Put your calibrated offset at the top of your main script
 float tofOffsetMm = 12.0f;  // Change this to whatever your calibration function prints out, default backup is 12
@@ -56,7 +56,7 @@ enum RobotState {
 RobotState state = STATE_WAIT;
 Servo motorL, motorR;
 Adafruit_VL53L0X tof;
-MPU6050 imu(MPU6050_DEFAULT_ADDRESS, &Wire2);
+MPU6050 imu(MPU6050_DEFAULT_ADDRESS, &Wire);
 float    yawAccum    = 0.0f;
 uint32_t tLastUs     = 0;
 int16_t  gyroZOffset = 0;
@@ -114,16 +114,16 @@ int edgeDirection() {
 // I2C MUX
 void muxSelect(uint8_t channel) {
   if (channel > 7) return;
-  Wire2.beginTransmission(MUX_ADDR);
-  Wire2.write(1 << channel);  // bitmask enables exactly one channel
-  Wire2.endTransmission();
+  Wire.beginTransmission(MUX_ADDR);
+  Wire.write(1 << channel);  // bitmask enables exactly one channel
+  Wire.endTransmission();
   delayMicroseconds(50);  // settle time before next transmission
 }
 
 void muxDisableAll() {
-  Wire2.beginTransmission(MUX_ADDR);
-  Wire2.write(0x00);  // zero disables all channels
-  Wire2.endTransmission();
+  Wire.beginTransmission(MUX_ADDR);
+  Wire.write(0x00);  // zero disables all channels
+  Wire.endTransmission();
 }
 
 // Software offset calibration — averages 50 readings against a target placed
@@ -508,6 +508,12 @@ void setup() {
   // Removed: while (!Serial && millis() < 3000) — causes 3s stall in competition
   // where no USB is connected. Remove for competition, restore for debugging.
 
+  // Solenoid pins — driven LOW even though solenoid logic is removed.
+  // Prevents floating gate on the MOSFET drivers (pins 44/45) from
+  // coupling noise and inadvertently pulsing the MOSFET.
+  pinMode(44, OUTPUT); digitalWrite(44, LOW);
+  pinMode(45, OUTPUT); digitalWrite(45, LOW);
+
   // Edge sensor pins
   // INPUT_PULLDOWN: floating pin reads LOW, preventing false triggers if
   // a sensor is disconnected.
@@ -525,15 +531,16 @@ void setup() {
   setMotors(0, 0);   // 1500 µs neutral — begins ESC arming sequence
   delay(2000);
 
-  // I2C on Wire2 (pins 24=SCL2, 25=SDA2)
-  Wire2.begin();
-  Wire2.setClock(400000);
+  // I2C on Wire (pins 18=SDA, 19=SCL)
+  Wire.begin();
+  Wire.setClock(400000);
+  Wire.setWireTimeout(3000, true);  // 3ms timeout, auto-reset bus on lockup
 
   muxDisableAll();
 
   // VL53L0X (mux ch0)
   muxSelect(MUX_CH_TOF_F);
-  if (!tof.begin(VL53L0X_I2C_ADDR, false, &Wire2)) {
+  if (!tof.begin(VL53L0X_I2C_ADDR, false, &Wire)) {
     Serial.println("ERROR: VL53L0X not found!");
     while (1);
   }

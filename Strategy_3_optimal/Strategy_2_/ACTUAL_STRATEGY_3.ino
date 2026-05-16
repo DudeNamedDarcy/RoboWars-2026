@@ -58,6 +58,21 @@ float    yawAccum    = 0.0f;
 uint32_t tLastUs     = 0;
 int16_t  gyroZOffset = 0;
 
+// ── Start/stop interrupt ──────────────────────────────────────────────────────
+// RISING  (button 2) → startRequested = true  — start or re-arm after halt
+// FALLING (button 3) → haltRequested  = true  — emergency stop from any state
+volatile bool haltRequested  = false;
+volatile bool startRequested = false;
+
+void ISR_startStop() {
+  if (digitalRead(PIN_START) == HIGH) {
+    startRequested = true;
+    haltRequested  = false;
+  } else {
+    haltRequested  = true;
+  }
+}
+
 bool edgeDetected() {
   // First read — if nothing is HIGH we can exit immediately without the debounce delay
   if (digitalRead(PIN_EDGE_FL) || digitalRead(PIN_EDGE_FR) ||
@@ -183,6 +198,8 @@ void executePivot() {
 
   while (abs(yawAccum) < PIVOT_DEGREES) {
 
+    if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
+
     if (edgeDetected()) {
       // Ramp down before stopping — avoids ESC voltage spike from instant cutoff
       while (spinPWM > 0) {
@@ -265,6 +282,8 @@ void executeScan() {
 
   while (millis() - scanStart < SCAN_TIMEOUT_MS) {
 
+    if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
+
     if (edgeDetected()) {
       // Ramp down spin before handing off — RECOVER starts its own ramp from 0
       while (scanPWM > 0) {
@@ -309,6 +328,8 @@ void executeRam() {
   int ramPWM = 0;
 
   while (true) {
+
+    if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
 
     if (edgeDetected()) {
       // Ramp both motors equally since they may have different corrected values
@@ -363,6 +384,7 @@ void executeRecover() {
   int recPWM = 0;
   uint32_t tReverse = millis();
   while (millis() - tReverse < 350) {
+    if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
     trapRamp(recPWM, 150, ACCEL_STEP_STOP);
     setMotors(-recPWM, -recPWM);  // both negative = reverse
   }
@@ -381,6 +403,8 @@ void executeRecover() {
   int pivPWM = 0;
 
   while (abs(yawAccum) < 90.0f) {
+
+    if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
 
     if (edgeDetected()) {
       // Second boundary hit during recovery pivot — ramp down in the same
@@ -442,6 +466,7 @@ void setup() {
   pinMode(PIN_EDGE_RR, INPUT_PULLDOWN);
 
   pinMode(PIN_START,   INPUT_PULLDOWN);
+  attachInterrupt(digitalPinToInterrupt(PIN_START), ISR_startStop, CHANGE);
   pinMode(PIN_MOTOR_L, OUTPUT);
   pinMode(PIN_MOTOR_R, OUTPUT);
   motorL.attach(PIN_MOTOR_L, 1000, 2000);
@@ -490,17 +515,21 @@ void setup() {
 
 // MAIN LOOP
 void loop() {
-  // Global safety check: If we have already started, but the signal drops LOW, we can then force a halt!
-  if (state != STATE_WAIT && digitalRead(PIN_START) == LOW) {
-    Serial.println("Stop signal detected! Halting...");
+  // Catches halt requests that arrive between blocking state calls.
+  // Requests that arrive *during* a blocking call are caught by the
+  // haltRequested checks inside each while loop.
+  if (haltRequested) {
+    setMotors(0, 0);
     state = STATE_HALT;
+    haltRequested = false;
   }
-
 
   switch (state) {
 
     case STATE_WAIT:
-      if (digitalRead(PIN_START) == HIGH) {
+      // startRequested is set by ISR on RISING edge of PIN_START (button 2)
+      if (startRequested) {
+        startRequested = false;
         Serial.println("Start!");
         state = STATE_PIVOT;
       }
@@ -525,6 +554,13 @@ void loop() {
     case STATE_HALT:
     default:
       setMotors(0, 0);
+      // Button 2 pressed again after a halt — re-arm without needing a reset
+      if (startRequested) {
+        startRequested = false;
+        haltRequested  = false;
+        Serial.println("Re-armed — waiting for start signal");
+        state = STATE_WAIT;
+      }
       break;
   }
 }

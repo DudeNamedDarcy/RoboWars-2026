@@ -25,6 +25,7 @@ float tofOffsetMm = 12.0f;  // Change this to whatever your calibration function
 // Sensor values
 #define TOF_ATTACK_MM   350
 #define TOF_SCAN_MM     900
+#define TOF_CLEAR_MM   1200   // RAM→SCAN exit threshold — wider than TOF_SCAN_MM to prevent oscillation
 #define TOF_CONTACT_MM  120
 
 // Motor Speeds
@@ -55,8 +56,7 @@ enum RobotState {
 RobotState state = STATE_WAIT;
 Servo motorL, motorR;
 Adafruit_VL53L0X tof;
-// MPU6050 constructor without Wire pointer — Wire2 is activated via muxSelect before any imu call
-MPU6050 imu;
+MPU6050 imu(MPU6050_DEFAULT_ADDRESS, &Wire2);
 float    yawAccum    = 0.0f;
 uint32_t tLastUs     = 0;
 int16_t  gyroZOffset = 0;
@@ -70,9 +70,8 @@ volatile bool startRequested = false;
 void ISR_startStop() {
   if (digitalRead(PIN_START) == HIGH) {
     startRequested = true;
-    haltRequested  = false;
   } else {
-    haltRequested  = true;
+    haltRequested = true;
   }
 }
 
@@ -105,6 +104,10 @@ int edgeDirection() {
   int rightCount = (fr ? 1 : 0) + (rr ? 1 : 0);
   if (leftCount > rightCount) return -1;
   if (rightCount > leftCount) return  1;
+  // Diagonal tiebreaker: FL+RR or FR+RL fire together with equal counts.
+  // Without this, both diagonals return 0 and the robot spins into the corner.
+  if (fl && rr && !fr && !rl) return -1;
+  if (fr && rl && !fl && !rr) return  1;
   return 0;
 }
 
@@ -123,44 +126,26 @@ void muxDisableAll() {
   Wire2.endTransmission();
 }
 
-// Note the '&' to pass the actual sensor object, not a copy
+// Software offset calibration — averages 50 readings against a target placed
+// exactly 100mm away and returns the correction to apply to all future reads.
+// Call manually when needed; do NOT call from setup() during competition boot.
 float calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
-  // Explicitly select ToF mux channel — keeps this function safe regardless
-  // of whatever channel was selected before it was called
   muxSelect(MUX_CH_TOF_F);
 
-  Serial.println("\n--- Starting VL53L0X Calibration ---");
-  Serial.println("Place a white target exactly 100mm away from the sensor.");
-  Serial.println("Starting in 5 seconds... Keep completely still.");
+  Serial.println("\n--- VL53L0X Offset Calibration ---");
+  Serial.println("Place target exactly 100mm from sensor. Hold still.");
+  Serial.println("Starting in 5 seconds...");
   delay(5000);
 
-  // 1. Perform Temperature / VHV (Very High Voltage) Calibration
-  // This is typically handled internally by the API during initialization,
-  // but we can force a clear tuning sequence here.
-  Serial.println("Calibrating internal tuning...");
-  
-  // 2. Data Initialization
-  // We call the underlying ST API to trigger a manual offset calibration
-  // The ST API expects the target to be at 100 mm.
-  uint32_t targetDistanceMm = 100; 
-  
-  // The underlying library uses standard ST API calls. 
-  // We can pass a manual offset correction if you notice a consistent error.
-  // However, the cleanest way to do this at runtime with the Adafruit wrapper
-  // is to take an average of readings and calculate a manual offset modifier.
-
-  // Declare offset before the if block so it is in scope for the return
+  const uint32_t targetDistanceMm = 100;
   float offset = 0.0f;
-  
   long sum = 0;
-  const int samples = 50;
   int validSamples = 0;
-  
-  for (int i = 0; i < samples; i++) {
+
+  for (int i = 0; i < 50; i++) {
     VL53L0X_RangingMeasurementData_t measure;
     sensor.rangingTest(&measure, false);
-    
-    if (measure.RangeStatus == 0) { // 0 means valid reading
+    if (measure.RangeStatus == 0) {
       sum += measure.RangeMilliMeter;
       validSamples++;
     }
@@ -169,20 +154,16 @@ float calibrateVL53L0X(Adafruit_VL53L0X &sensor) {
 
   if (validSamples > 0) {
     float averageReading = (float)sum / validSamples;
-    // Calculate the systematic error (Offset)
     offset = targetDistanceMm - averageReading;
-    
-    Serial.print("Calibration Complete.");
-    Serial.print(" Expected: 100mm | Average Measured: ");
+    Serial.print("Expected: 100mm | Measured avg: ");
     Serial.print(averageReading);
-    Serial.print("mm | Calculated Offset: ");
+    Serial.print("mm | Offset: ");
     Serial.println(offset);
-    
-    Serial.println("Apply this offset value to your readToF() measurements!");
+    Serial.println("Set tofOffsetMm to this value at the top of the file.");
   } else {
-    Serial.println("Calibration FAILED: No valid readings detected.");
+    Serial.println("FAILED: no valid readings.");
   }
-  Serial.println("-------------------------------------\n");
+  Serial.println("-----------------------------------\n");
   return offset;
 }
 
@@ -191,12 +172,13 @@ uint16_t readToF(uint8_t muxChannel) {
   muxSelect(muxChannel);
   VL53L0X_RangingMeasurementData_t measure;
   tof.rangingTest(&measure, false);
-  
-  if (measure.RangeStatus != 4) {
-    // Automatically applies whatever value was saved at boot
-    int correctedDist = measure.RangeMilliMeter + tofOffsetMm; 
+  if (measure.RangeStatus == 0) {
+    int correctedDist = measure.RangeMilliMeter + tofOffsetMm;
     return constrain(correctedDist, 0, 2000);
   }
+  // Status 3 = min-range fail: target is closer than ~30mm sensor floor.
+  // Return 0 so the calling state treats it as contact, not as clear.
+  if (measure.RangeStatus == 3) return 0;
   return 2000;
 }
 
@@ -268,8 +250,8 @@ void executePivot() {
     if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
 
     if (edgeDetected()) {
-      // Ramp down before stopping — avoids ESC voltage spike from instant cutoff
       while (spinPWM > 0) {
+        if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
         trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
         setMotors(spinPWM, -spinPWM);
       }
@@ -310,8 +292,8 @@ void executePivot() {
       muxSelect(MUX_CH_IMU);  // reselect IMU after ToF switches the mux
       if (dist < TOF_ATTACK_MM) {
         Serial.println("Target mid-pivot — transitioning to RAM");
-        // Ramp down before RAM so it starts from a clean zero
         while (spinPWM > 0) {
+          if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
           trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
           setMotors(spinPWM, -spinPWM);
         }
@@ -322,9 +304,8 @@ void executePivot() {
     }
   }
 
-  // Normal completion — spinPWM is already near 40 from decel zone,
-  // so this ramp is brief
   while (spinPWM > 0) {
+    if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
     trapRamp(spinPWM, 0, ACCEL_STEP_STOP);
     setMotors(spinPWM, -spinPWM);
   }
@@ -343,7 +324,7 @@ void executePivot() {
 void executeScan() {
   Serial.println("STATE: SCAN");
 
-  int scanPWM = 0;
+  static int scanPWM = 0;
   uint32_t scanStart = millis();
   const uint32_t SCAN_TIMEOUT_MS = 1500;
 
@@ -352,8 +333,8 @@ void executeScan() {
     if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
 
     if (edgeDetected()) {
-      // Ramp down spin before handing off — RECOVER starts its own ramp from 0
       while (scanPWM > 0) {
+        if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
         trapRamp(scanPWM, 0, ACCEL_STEP_STOP);
         setMotors(scanPWM, -scanPWM);
       }
@@ -370,8 +351,8 @@ void executeScan() {
       Serial.print("Target at ");
       Serial.print(dist);
       Serial.println(" mm — transitioning to RAM");
-      // Stop spin cleanly so RAM begins its ramp from zero, not mid-spin
       while (scanPWM > 0) {
+        if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
         trapRamp(scanPWM, 0, ACCEL_STEP_STOP);
         setMotors(scanPWM, -scanPWM);
       }
@@ -399,8 +380,8 @@ void executeRam() {
     if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
 
     if (edgeDetected()) {
-      // Ramp both motors equally since they may have different corrected values
       while (ramPWM > 0) {
+        if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
         trapRamp(ramPWM, 0, ACCEL_STEP_STOP);
         setMotors(ramPWM, ramPWM);
       }
@@ -414,17 +395,18 @@ void executeRam() {
 
     // Apply differential correction to counteract heading drift during attack
     float correction = headingCorrection();
-    int corrL = constrain((int)(ramPWM - correction), 0, PWM_MAX);
-    int corrR = constrain((int)(ramPWM + correction), 0, PWM_MAX);
+    int corrL = constrain((int)(ramPWM + correction), 0, PWM_MAX);
+    int corrR = constrain((int)(ramPWM - correction), 0, PWM_MAX);
     setMotors(corrL, corrR);
 
     uint16_t dist = readToF(MUX_CH_TOF_F);
 
-    if (dist > TOF_SCAN_MM) {
-      // Opponent escaped — decelerate before spinning to scan
-      // avoids carrying forward momentum into the scan rotation
+    if (dist > TOF_CLEAR_MM) {
+      // Opponent escaped beyond hysteresis band — wider than TOF_SCAN_MM entry
+      // threshold to prevent SCAN↔RAM oscillation near the boundary
       Serial.println("Contact lost — transitioning to SCAN");
       while (ramPWM > 0) {
+        if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
         trapRamp(ramPWM, 0, ACCEL_STEP_STOP);
         setMotors(ramPWM, ramPWM);
       }
@@ -456,8 +438,8 @@ void executeRecover() {
     setMotors(-recPWM, -recPWM);  // both negative = reverse
   }
 
-  // Ramp reverse down before stopping
   while (recPWM > 0) {
+    if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
     trapRamp(recPWM, 0, ACCEL_STEP_STOP);
     setMotors(-recPWM, -recPWM);
   }
@@ -478,6 +460,7 @@ void executeRecover() {
       // spin direction we were already turning, then re-enter RECOVER
       // with a fresh direction read for the new situation
       while (pivPWM > 0) {
+        if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
         trapRamp(pivPWM, 0, ACCEL_STEP_STOP);
         if (dir >= 0) setMotors(-pivPWM,  pivPWM);
         else          setMotors( pivPWM, -pivPWM);
@@ -506,8 +489,8 @@ void executeRecover() {
     else          setMotors( pivPWM, -pivPWM);
   }
 
-  // Ramp down recovery pivot before transitioning to SCAN
   while (pivPWM > 0) {
+    if (haltRequested) { setMotors(0, 0); state = STATE_HALT; return; }
     trapRamp(pivPWM, 0, ACCEL_STEP_STOP);
     if (dir >= 0) setMotors(-pivPWM,  pivPWM);
     else          setMotors( pivPWM, -pivPWM);
@@ -558,26 +541,9 @@ void setup() {
   tof.startRangeContinuous();
   Serial.println("VL53L0X OK");
 
-  // === AUTONOMOUS TOF CALIBRATION TRIGGER ===
-  Serial.println("Checking for calibration target...");
-  delay(200); // Give the sensor a brief moment to stabilize continuous readings
-  
-  VL53L0X_RangingMeasurementData_t bootMeasure;
-  tof.rangingTest(&bootMeasure, false);
-  
-  // If an object is detected closer than 150mm at boot, run calibration autonomously
-  if (bootMeasure.RangeStatus != 4 && bootMeasure.RangeMilliMeter < 150) {
-    Serial.println("Target detected at boot! Starting Auto-Calibration...");
-    
-    // Optional: Flash a light or beep a buzzer here if your robot has one 
-    // to signal you to keep your hand perfectly still at the 100mm mark.
-    
-    tofOffsetMm = calibrateVL53L0X(tof); 
-  } else {
-    Serial.print("No boot target detected. Using default offset: ");
-    Serial.println(tofOffsetMm);
-  }
-  // ==========================================
+  Serial.print("ToF offset: ");
+  Serial.print(tofOffsetMm);
+  Serial.println(" mm (edit tofOffsetMm at top of file to adjust)");
 
   // MPU-6050 (mux ch2)
   muxSelect(MUX_CH_IMU);
